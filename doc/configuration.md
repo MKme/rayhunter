@@ -11,6 +11,7 @@ Through web UI you can set:
   - *Demo mode (orca gif)*, which shows image of orcas *and* colored line.
   - *EFF logo*, which shows EFF logo *and* colored line.
   - *High visibility (full screen color)*: fills the entire screen with the status color (green for recording, red for warnings, white for paused).
+- **Screen Warning Alert** (Orbic/Moxee) wakes the display and flashes a configurable message when a heuristic warning is detected. The alert remains latched until a physical device button is pressed or **Stop Alert** is selected in the web UI. Acknowledging the screen does not stop recording or delete the warning. **Test Screen Alert** exercises the same wake, flash, and acknowledgement path without creating a detection.
 - **Device Input Mode**, which defines behavior of built-in power button of the device. *Device Input Mode* could be:
   - *Disable button control*: built-in power button of the device is not used by Rayhunter.
   - *Double-tap power button to start new recording*: double clicking on a built-in power button of the device stops and immediately restarts the recording. This could be useful if Rayhunter's heuristics is triggered and you get the red line, and you want to "reset" the past warnings. Normally you can do that through web UI, but sometimes it is easier to double tap on power button.
@@ -22,6 +23,14 @@ Through web UI you can set:
   - *Low Battery*, which will alert when the device's battery is low. Notifications may not be supported for all devices—you can check if your device is supported by looking at whether the battery level indicator is functioning on the System Information section of the Rayhunter UI.
   - *Software Updates*, which will alert when a new Rayhunter release is available. Only triggers when *Automatically check for software updates* is enabled.
 - With **Analyzer Heuristic Settings** you can switch on or off built-in [Rayhunter heuristics](heuristics.md). Some heuristics are experimental or can trigger a lot of false positive warnings in some networks (our tests have shown that some heuristics have different behavior in US or European networks). In that case you can decide whether you would like to have the heuristics that trigger a lot of false positives on or off. Please note that we are constantly improving and adding new heuristics, so a new release may reduce false positives in existing heuristics as well.
+
+The alert message is converted to uppercase and rendered with a compact bitmap font. It must contain no more than 80 supported ASCII characters and fit within eight wrapped lines on the 128×128 display. The default configuration is:
+
+```toml
+[screen_alert]
+enabled = true
+message = "POSSIBLE CELL-SITE SIMULATOR DETECTED - PRESS KEY TO CLEAR"
+```
 
 ## GPS
 

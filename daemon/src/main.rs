@@ -28,8 +28,9 @@ use crate::notifications::{NotificationService, run_notification_worker};
 use crate::pcap::get_pcap;
 use crate::qmdl_store::RecordingStore;
 use crate::server::{
-    ServerState, debug_set_display_state, get_config, get_qmdl, get_time, get_wifi_status, get_zip,
-    scan_wifi, serve_static, set_config, set_time_offset, test_notification,
+    ServerState, acknowledge_screen_alert, debug_set_display_state, get_config, get_qmdl, get_time,
+    get_wifi_status, get_zip, scan_wifi, serve_static, set_config, set_time_offset,
+    test_notification, test_screen_alert,
 };
 use crate::stats::{get_qmdl_manifest, get_system_stats, get_update_status};
 use crate::update::{UpdateStatus, run_update_check_worker};
@@ -79,6 +80,11 @@ fn get_router() -> AppRouter {
         .route("/api/config", get(get_config))
         .route("/api/config", post(set_config))
         .route("/api/test-notification", post(test_notification))
+        .route("/api/test-screen-alert", post(test_screen_alert))
+        .route(
+            "/api/acknowledge-screen-alert",
+            post(acknowledge_screen_alert),
+        )
         .route("/api/wifi-status", get(get_wifi_status))
         .route("/api/wifi-scan", post(scan_wifi))
         .route("/api/time", get(get_time))
@@ -212,6 +218,7 @@ async fn run_with_config(
     let qmdl_store_lock = Arc::new(RwLock::new(store));
     let (diag_tx, diag_rx) = mpsc::channel::<DiagDeviceCtrlMessage>(1);
     let (ui_update_tx, ui_update_rx) = mpsc::channel::<display::DisplayState>(1);
+    let (screen_alert_tx, screen_alert_rx) = mpsc::channel::<display::ScreenAlertCommand>(4);
     let (analysis_tx, analysis_rx) = mpsc::channel::<AnalysisCtrlMessage>(5);
     let restart_token = CancellationToken::new();
     let shutdown_token = restart_token.child_token();
@@ -223,6 +230,7 @@ async fn run_with_config(
     let notification_service = NotificationService::new(config.ntfy_url.clone());
     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
 
+    let mut screen_alert_sender = None;
     if !config.debug_mode {
         info!("Starting Diag Thread");
         let gps_fixed_coords = match (config.gps_fixed_latitude, config.gps_fixed_longitude) {
@@ -246,21 +254,65 @@ async fn run_with_config(
         );
         info!("Starting UI");
 
-        let update_ui = match &config.device {
-            Device::Orbic | Device::Moxee => display::orbic::update_ui,
-            Device::Tplink => display::tplink::update_ui,
-            Device::Tmobile => display::tmobile::update_ui,
-            Device::Wingtech => display::wingtech::update_ui,
-            Device::Pinephone => display::headless::update_ui,
-            Device::Uz801 => display::uz801::update_ui,
-        };
-        update_ui(&task_tracker, &config, shutdown_token.clone(), ui_update_rx);
+        match &config.device {
+            Device::Orbic | Device::Moxee => {
+                screen_alert_sender = Some(screen_alert_tx.clone());
+                display::orbic::update_ui(
+                    &task_tracker,
+                    &config,
+                    shutdown_token.clone(),
+                    ui_update_rx,
+                    screen_alert_rx,
+                );
+            }
+            Device::Tplink => {
+                display::tplink::update_ui(
+                    &task_tracker,
+                    &config,
+                    shutdown_token.clone(),
+                    ui_update_rx,
+                );
+            }
+            Device::Tmobile => {
+                display::tmobile::update_ui(
+                    &task_tracker,
+                    &config,
+                    shutdown_token.clone(),
+                    ui_update_rx,
+                );
+            }
+            Device::Wingtech => {
+                display::wingtech::update_ui(
+                    &task_tracker,
+                    &config,
+                    shutdown_token.clone(),
+                    ui_update_rx,
+                );
+            }
+            Device::Pinephone => {
+                display::headless::update_ui(
+                    &task_tracker,
+                    &config,
+                    shutdown_token.clone(),
+                    ui_update_rx,
+                );
+            }
+            Device::Uz801 => {
+                display::uz801::update_ui(
+                    &task_tracker,
+                    &config,
+                    shutdown_token.clone(),
+                    ui_update_rx,
+                );
+            }
+        }
 
         info!("Starting Key Input service");
         key_input::run_key_input_thread(
             &task_tracker,
             &config,
             diag_tx.clone(),
+            screen_alert_sender.clone(),
             shutdown_token.clone(),
         );
 
@@ -351,6 +403,7 @@ async fn run_with_config(
         analysis_sender: analysis_tx,
         daemon_restart_token: restart_token.clone(),
         ui_update_sender: Some(ui_update_tx),
+        screen_alert_sender,
         wifi_status,
         wifi_scan_lock: tokio::sync::Mutex::new(()),
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),

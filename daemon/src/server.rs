@@ -16,11 +16,12 @@ use rayhunter::qmdl::QmdlMessageReader;
 use serde::{Deserialize, Serialize};
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::fs::write;
 use tokio::io::copy;
 use tokio::io::duplex;
 use tokio::sync::RwLock;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc::Sender, oneshot};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
 use tokio_util::compat::FuturesAsyncWriteCompatExt;
 use tokio_util::io::ReaderStream;
@@ -30,11 +31,14 @@ use crate::analysis::{AnalysisCtrlMessage, AnalysisStatus};
 use crate::config::{Config, GpsMode};
 use crate::diag::DiagDeviceCtrlMessage;
 use crate::display::DisplayState;
+use crate::display::ScreenAlertCommand;
 use crate::gps::GpsData;
 use crate::notifications::DEFAULT_NOTIFICATION_TIMEOUT;
 use crate::pcap::{generate_pcap_data, load_gps_records_for_entry};
 use crate::qmdl_store::{FileKind, RecordingStore};
 use crate::update::UpdateStatus;
+
+const SCREEN_ALERT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct ServerState {
     pub config_path: String,
@@ -45,6 +49,7 @@ pub struct ServerState {
     pub analysis_sender: Sender<AnalysisCtrlMessage>,
     pub daemon_restart_token: CancellationToken,
     pub ui_update_sender: Option<Sender<DisplayState>>,
+    pub screen_alert_sender: Option<Sender<ScreenAlertCommand>>,
     pub wifi_status: Arc<RwLock<wifi_station::WifiStatus>>,
     pub wifi_scan_lock: tokio::sync::Mutex<()>,
     pub gps_state: Arc<RwLock<Option<GpsData>>>,
@@ -173,6 +178,8 @@ pub async fn set_config(
     State(state): State<Arc<ServerState>>,
     Json(mut config): Json<Config>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
+    crate::display::screen_alert::validate_message(&config.screen_alert.message)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
     if config.gps_mode != GpsMode::Fixed {
         config.gps_fixed_latitude = None;
         config.gps_fixed_longitude = None;
@@ -204,6 +211,124 @@ pub async fn set_config(
         StatusCode::ACCEPTED,
         "wrote config and triggered restart".to_string(),
     ))
+}
+
+#[cfg_attr(feature = "apidocs", utoipa::path(
+    post,
+    path = "/api/test-screen-alert",
+    tag = "Configuration",
+    responses(
+        (status = StatusCode::OK, description = "Screen alert started"),
+        (status = StatusCode::CONFLICT, description = "Screen alert feature is disabled"),
+        (status = StatusCode::SERVICE_UNAVAILABLE, description = "Screen alerts are unsupported or unavailable"),
+        (status = StatusCode::GATEWAY_TIMEOUT, description = "Screen alert display path did not respond")
+    ),
+    summary = "Test the latched device screen alert",
+    description = "Wake and flash the device screen using the configured message until a device button or the acknowledge endpoint clears it."
+))]
+pub async fn test_screen_alert(
+    State(state): State<Arc<ServerState>>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    if !state.config.screen_alert.enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            "enable and save the screen alert setting before testing".to_string(),
+        ));
+    }
+    let sender = state.screen_alert_sender.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "screen alerts are not available on this device".to_string(),
+    ))?;
+    let (response_tx, response_rx) = oneshot::channel();
+    tokio::time::timeout(
+        SCREEN_ALERT_RESPONSE_TIMEOUT,
+        sender.send(ScreenAlertCommand::Test { response_tx }),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            "screen alert service did not respond".to_string(),
+        )
+    })?
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "screen alert service is unavailable".to_string(),
+        )
+    })?;
+    tokio::time::timeout(SCREEN_ALERT_RESPONSE_TIMEOUT, response_rx)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                "screen alert did not draw its first frame".to_string(),
+            )
+        })?
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "screen alert service stopped before drawing".to_string(),
+            )
+        })?;
+    Ok((StatusCode::OK, "screen alert started".to_string()))
+}
+
+#[cfg_attr(feature = "apidocs", utoipa::path(
+    post,
+    path = "/api/acknowledge-screen-alert",
+    tag = "Configuration",
+    responses(
+        (status = StatusCode::OK, description = "Active screen alert acknowledged"),
+        (status = StatusCode::CONFLICT, description = "No screen alert is active"),
+        (status = StatusCode::SERVICE_UNAVAILABLE, description = "Screen alerts are unsupported or unavailable"),
+        (status = StatusCode::GATEWAY_TIMEOUT, description = "Screen alert display path did not respond")
+    ),
+    summary = "Acknowledge the device screen alert",
+    description = "Stop a latched screen alert without changing recording state or deleting the warning."
+))]
+pub async fn acknowledge_screen_alert(
+    State(state): State<Arc<ServerState>>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let sender = state.screen_alert_sender.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "screen alerts are not available on this device".to_string(),
+    ))?;
+    let (response_tx, response_rx) = oneshot::channel();
+    tokio::time::timeout(
+        SCREEN_ALERT_RESPONSE_TIMEOUT,
+        sender.send(ScreenAlertCommand::Acknowledge {
+            response_tx: Some(response_tx),
+        }),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            "screen alert service did not respond".to_string(),
+        )
+    })?
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "screen alert service is unavailable".to_string(),
+        )
+    })?;
+    match tokio::time::timeout(SCREEN_ALERT_RESPONSE_TIMEOUT, response_rx).await {
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            "screen alert service did not respond".to_string(),
+        )),
+        Ok(Ok(true)) => Ok((StatusCode::OK, "screen alert acknowledged".to_string())),
+        Ok(Ok(false)) => Err((
+            StatusCode::CONFLICT,
+            "no screen alert is active".to_string(),
+        )),
+        Ok(Err(_)) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "screen alert service did not respond".to_string(),
+        )),
+    }
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -616,6 +741,7 @@ mod tests {
             analysis_sender: analysis_tx,
             daemon_restart_token: CancellationToken::new(),
             ui_update_sender: None,
+            screen_alert_sender: None,
             wifi_status: Arc::new(RwLock::new(wifi_station::WifiStatus::default())),
             wifi_scan_lock: tokio::sync::Mutex::new(()),
             gps_state: Arc::new(RwLock::new(None)),
@@ -689,5 +815,54 @@ mod tests {
             qmdl_reader.get_next_message().await.unwrap(),
             Some(Ok(expected_message)),
         );
+    }
+
+    #[tokio::test]
+    async fn screen_alert_test_and_acknowledgement_use_the_display_service() {
+        let (_temp_dir, store_lock) = create_test_qmdl_store().await;
+        let mut state = create_test_server_state(store_lock);
+        let (screen_alert_tx, mut screen_alert_rx) = tokio::sync::mpsc::channel(2);
+        Arc::get_mut(&mut state).unwrap().screen_alert_sender = Some(screen_alert_tx);
+
+        let display_task = tokio::spawn(async move {
+            let Some(ScreenAlertCommand::Test { response_tx }) = screen_alert_rx.recv().await
+            else {
+                panic!("expected screen alert test command");
+            };
+            response_tx.send(()).unwrap();
+            let Some(ScreenAlertCommand::Acknowledge { response_tx }) =
+                screen_alert_rx.recv().await
+            else {
+                panic!("expected acknowledgement command");
+            };
+            response_tx.unwrap().send(true).unwrap();
+        });
+
+        assert_eq!(
+            test_screen_alert(State(state.clone())).await.unwrap().0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            acknowledge_screen_alert(State(state)).await.unwrap().0,
+            StatusCode::OK
+        );
+        display_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_screen_alert_config_is_rejected_before_write_or_restart() {
+        let (temp_dir, store_lock) = create_test_qmdl_store().await;
+        let mut state = create_test_server_state(store_lock);
+        let config_path = temp_dir.path().join("invalid-config.toml");
+        let state_inner = Arc::get_mut(&mut state).unwrap();
+        state_inner.config_path = config_path.to_string_lossy().into_owned();
+        let restart_token = state_inner.daemon_restart_token.clone();
+        let mut config = Config::default();
+        config.screen_alert.message = "unsupported 🚨".to_string();
+
+        let error = set_config(State(state), Json(config)).await.unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(!config_path.exists());
+        assert!(!restart_token.is_cancelled());
     }
 }

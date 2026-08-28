@@ -37,6 +37,28 @@ pub enum KeyInputMode {
 }
 use crate::notifications::NotificationType;
 
+pub const DEFAULT_SCREEN_ALERT_MESSAGE: &str =
+    "POSSIBLE CELL-SITE SIMULATOR DETECTED - PRESS KEY TO CLEAR";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+#[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
+pub struct ScreenAlertConfig {
+    /// Wake and flash the device screen when a warning is detected.
+    pub enabled: bool,
+    /// Message shown while the warning is flashing.
+    pub message: String,
+}
+
+impl Default for ScreenAlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            message: DEFAULT_SCREEN_ALERT_MESSAGE.to_string(),
+        }
+    }
+}
+
 /// The structure of a valid rayhunter configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -56,6 +78,8 @@ pub struct Config {
     pub colorblind_mode: bool,
     /// Key input mode
     pub key_input_mode: KeyInputMode,
+    /// Latched on-device warning alert configuration
+    pub screen_alert: ScreenAlertConfig,
     /// ntfy.sh URL
     pub ntfy_url: Option<String>,
     /// Vector containing the types of enabled notifications
@@ -133,6 +157,7 @@ impl Default for Config {
             ui_level: UiLevel::Subtle,
             colorblind_mode: false,
             key_input_mode: KeyInputMode::Disabled,
+            screen_alert: ScreenAlertConfig::default(),
             analyzers: AnalyzerConfig::default(),
             ntfy_url: None,
             enabled_notifications: vec![NotificationType::Warning, NotificationType::LowBattery],
@@ -232,5 +257,30 @@ pub fn parse_args() -> Args {
     }
     Args {
         config_path: args[1].clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distribution_template_keeps_root_settings_at_the_root() {
+        let config: Config = toml::from_str(include_str!("../../dist/config.toml.in"))
+            .expect("distribution config template should parse");
+
+        assert!(config.screen_alert.enabled);
+        assert_eq!(
+            config.screen_alert.message,
+            DEFAULT_SCREEN_ALERT_MESSAGE.to_string()
+        );
+        assert!(!config.auto_check_updates);
+        assert_eq!(config.min_space_to_start_recording_mb, 1);
+        assert_eq!(config.min_space_to_continue_recording_mb, 1);
+        assert!(!config.wifi_enabled);
+        assert_eq!(
+            config.enabled_notifications,
+            vec![NotificationType::Warning, NotificationType::LowBattery]
+        );
     }
 }

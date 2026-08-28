@@ -52,5 +52,6 @@ pub fn update_ui(
         Framebuffer,
         shutdown_token,
         ui_update_rx,
+        None,
     )
 }

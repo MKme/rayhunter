@@ -3,6 +3,8 @@
         get_config,
         set_config,
         test_notification,
+        test_screen_alert,
+        acknowledge_screen_alert,
         get_wifi_status,
         scan_wifi_networks,
         GpsMode,
@@ -20,10 +22,14 @@
     let loading = $state(false);
     let saving = $state(false);
     let testingNotification = $state(false);
+    let testingScreenAlert = $state(false);
+    let stoppingScreenAlert = $state(false);
     let message = $state('');
     let messageType = $state<'success' | 'error' | null>(null);
     let testMessage = $state('');
     let testMessageType = $state<'success' | 'error' | null>(null);
+    let screenAlertMessage = $state('');
+    let screenAlertMessageType = $state<'success' | 'error' | null>(null);
     let wifiStatus = $state<WifiStatus | null>(null);
     let wifiStatusTimer = $state<ReturnType<typeof setInterval> | null>(null);
     let scanning = $state(false);
@@ -37,6 +43,8 @@
             dnsServersInput = config.dns_servers ? config.dns_servers.join(', ') : '';
             message = '';
             messageType = null;
+            screenAlertMessage = '';
+            screenAlertMessageType = null;
             poll_wifi_status();
         } catch (error) {
             message = `Failed to load config: ${error}`;
@@ -131,6 +139,39 @@
         }
     }
 
+    async function start_test_screen_alert() {
+        try {
+            testingScreenAlert = true;
+            screenAlertMessage = '';
+            screenAlertMessageType = null;
+            await test_screen_alert();
+            screenAlertMessage =
+                'Screen alert started. It will continue until you press a device button or select Stop Alert.';
+            screenAlertMessageType = 'success';
+        } catch (error) {
+            screenAlertMessage = `Failed to start screen alert: ${error}`;
+            screenAlertMessageType = 'error';
+        } finally {
+            testingScreenAlert = false;
+        }
+    }
+
+    async function stop_test_screen_alert() {
+        try {
+            stoppingScreenAlert = true;
+            screenAlertMessage = '';
+            screenAlertMessageType = null;
+            await acknowledge_screen_alert();
+            screenAlertMessage = 'Screen alert stopped.';
+            screenAlertMessageType = 'success';
+        } catch (error) {
+            screenAlertMessage = `Failed to stop screen alert: ${error}`;
+            screenAlertMessageType = 'error';
+        } finally {
+            stoppingScreenAlert = false;
+        }
+    }
+
     $effect(() => {
         if (shown && !config) {
             load_config();
@@ -180,6 +221,101 @@
                         expected
                     </p>
                 </div>
+
+                {#if config.device === 'orbic' || config.device === 'moxee'}
+                    <div class="border-t border-gray-200 pt-4 mt-6 space-y-3">
+                        <h3 class="text-lg font-semibold text-gray-800">Screen Warning Alert</h3>
+
+                        <div class="flex items-center">
+                            <input
+                                id="screen_alert_enabled"
+                                type="checkbox"
+                                bind:checked={config.screen_alert.enabled}
+                                class="h-4 w-4 text-rayhunter-blue focus:ring-rayhunter-blue border-gray-300 rounded-sm"
+                            />
+                            <label
+                                for="screen_alert_enabled"
+                                class="ml-2 block text-sm text-gray-700"
+                            >
+                                Wake and flash the screen on warnings
+                            </label>
+                        </div>
+
+                        <div>
+                            <label
+                                for="screen_alert_message"
+                                class="block text-sm font-medium text-gray-700 mb-1"
+                            >
+                                Alert message
+                            </label>
+                            <textarea
+                                id="screen_alert_message"
+                                bind:value={config.screen_alert.message}
+                                maxlength="80"
+                                rows="3"
+                                placeholder="SUSPICIOUS CELLULAR DEVICE DETECTED"
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-hidden focus:ring-2 focus:ring-rayhunter-blue"
+                            ></textarea>
+                            <div class="flex justify-between gap-3 mt-1 text-xs text-gray-500">
+                                <p>
+                                    Displayed in uppercase and wrapped to fit the 128 &times; 128
+                                    device screen.
+                                </p>
+                                <span class="shrink-0">{config.screen_alert.message.length}/80</span
+                                >
+                            </div>
+                        </div>
+
+                        <p class="text-xs text-amber-700">
+                            Save settings with Apply and restart before testing. The test uses the
+                            last saved setting and message.
+                        </p>
+
+                        <div class="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                onclick={start_test_screen_alert}
+                                disabled={testingScreenAlert || stoppingScreenAlert}
+                                class="bg-rayhunter-blue hover:bg-rayhunter-dark-blue disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-md flex flex-row gap-1 items-center"
+                            >
+                                {#if testingScreenAlert}
+                                    <div
+                                        class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"
+                                    ></div>
+                                    Starting...
+                                {:else}
+                                    Test Screen Alert
+                                {/if}
+                            </button>
+                            <button
+                                type="button"
+                                onclick={stop_test_screen_alert}
+                                disabled={testingScreenAlert || stoppingScreenAlert}
+                                class="bg-gray-100 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed text-gray-800 font-bold py-2 px-4 border border-gray-300 rounded-md flex flex-row gap-1 items-center"
+                            >
+                                {#if stoppingScreenAlert}
+                                    <div
+                                        class="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"
+                                    ></div>
+                                    Stopping...
+                                {:else}
+                                    Stop Alert
+                                {/if}
+                            </button>
+                        </div>
+
+                        {#if screenAlertMessage}
+                            <div
+                                aria-live="polite"
+                                class="p-2 rounded-sm text-sm {screenAlertMessageType === 'error'
+                                    ? 'bg-red-100 text-red-700'
+                                    : 'bg-green-100 text-green-700'}"
+                            >
+                                {screenAlertMessage}
+                            </div>
+                        {/if}
+                    </div>
+                {/if}
 
                 <div>
                     <label

@@ -29,6 +29,11 @@ export interface WebdavConfig {
     delete_on_upload: boolean;
 }
 
+export interface ScreenAlertConfig {
+    enabled: boolean;
+    message: string;
+}
+
 export enum GpsMode {
     Disabled = 0,
     Fixed = 1,
@@ -51,6 +56,7 @@ export interface Config {
     ui_level: number;
     colorblind_mode: boolean;
     key_input_mode: number;
+    screen_alert: ScreenAlertConfig;
     ntfy_url: string | null;
     enabled_notifications: enabled_notifications[];
     auto_check_updates: boolean;
@@ -164,6 +170,14 @@ export async function test_notification(): Promise<void> {
         const error = await response.text();
         throw new Error(error);
     }
+}
+
+export async function test_screen_alert(): Promise<void> {
+    await req('POST', '/api/test-screen-alert');
+}
+
+export async function acknowledge_screen_alert(): Promise<void> {
+    await req('POST', '/api/acknowledge-screen-alert');
 }
 
 export interface TimeResponse {

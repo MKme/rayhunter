@@ -1,7 +1,9 @@
 use rayhunter::analysis::analyzer::EventType;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 mod generic_framebuffer;
+pub mod screen_alert;
 
 pub mod headless;
 pub mod orbic;
@@ -25,4 +27,16 @@ pub enum DisplayState {
     /// Note that EventType::Informational is never sent through this. If it is, it's the same as
     /// Recording
     WarningDetected { event_type: EventType },
+}
+
+/// Commands for the latched warning overlay. These are kept separate from
+/// `DisplayState` so testing or acknowledging an alert cannot change the
+/// recording state or erase a captured warning.
+pub enum ScreenAlertCommand {
+    Test {
+        response_tx: oneshot::Sender<()>,
+    },
+    Acknowledge {
+        response_tx: Option<oneshot::Sender<bool>>,
+    },
 }

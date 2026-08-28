@@ -47,6 +47,13 @@ wifi_enabled = false
 # Defaults to ["9.9.9.9", "149.112.112.112"] (Quad9) if not specified.
 # dns_servers = ["9.9.9.9", "149.112.112.112"]
 
+# Latched on-device screen alert (Orbic/Moxee).
+# When enabled, a warning wakes the screen and flashes this message until a
+# physical device button or the web UI Stop Alert control acknowledges it.
+[screen_alert]
+enabled = true
+message = "POSSIBLE CELL-SITE SIMULATOR DETECTED - PRESS KEY TO CLEAR"
+
 # WebDAV Upload
 # If a [webdav] section is present, finished recordings (both the raw .qmdl file
 # and its .ndjson analysis output) are uploaded in the background to a WebDAV

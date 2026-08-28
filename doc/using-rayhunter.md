@@ -2,6 +2,8 @@
 
 Once installed, Rayhunter will run automatically whenever your device is running. You'll see a green line on top of the device's display to indicate that it's running and recording. [The line will turn yellow dots, orange dashes, or solid red](./faq.md#red) once a potential IMSI catcher has been found, depending on the severity of the alert, until the device is rebooted or a new recording is started through the web UI.
 
+On Orbic and Moxee devices with **Screen Warning Alert** enabled, the first warning also wakes the display and flashes the configured warning text. Press a physical device button to acknowledge the flashing overlay. This only silences the overlay: recording continues and the warning status remains available on the display and in the web UI. A later higher-severity warning, or the first warning in a new recording, will alert again.
+
 ![Rayhunter_0 5 0](./Rayhunter_0.5.0.png)
 
 It also serves a web UI that provides some basic controls, such as being able to start/stop recordings, download captures, delete captures, and view heuristic analyses of captures.
