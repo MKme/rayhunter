@@ -6,10 +6,7 @@
 
 Rayhunter is a project for detecting IMSI catchers, also known as cell-site simulators or stingrays. It was first designed to run on a cheap mobile hotspot called the Orbic RC400L, but thanks to community efforts, it can [support some other devices as well](https://efforg.github.io/rayhunter/supported-devices.html). It is designed to be easy to install and use regardless of technical experience, and to minimize false positives.
 
-This fork is based on Rayhunter 0.12.0 and adds a **latched, on-device warning screen** for Orbic RC400L and Moxee hardware. A heuristic detection can wake a sleeping display and flash a plain-English alert until someone acknowledges it on the device. The warning is completely local: a phone, web browser, Internet connection, or connection to the hotspot is not required when a detection occurs.
-
-> [!IMPORTANT]
-> Sentinel XTOC LAN alert-packet support is planned as the next phase. It is **not implemented in this revision**.
+This fork is based on Rayhunter 0.12.0 and adds a **latched, on-device warning screen** for Orbic RC400L and Moxee hardware plus **plug-and-play XTOC/XCOM LAN alerts**. A heuristic detection can wake a sleeping display and flash a plain-English alert until someone acknowledges it on the device. When Rayhunter and XTOC/XCOM share a LAN, the same detection is also broadcast directly as native X1 Event and optional Sentinel packets. No Internet service, cloud account, or separate message broker is involved.
 
 ## On-device screen alert
 
@@ -45,6 +42,43 @@ The normal dashboard continues to provide recording, capture-download, analysis,
 Open **Config** to enable the local alert, edit its message, start a hardware test, or stop an active alert.
 
 ![Live Screen Warning Alert controls](doc/images/screen-alert-web-config.png)
+
+## XTOC and XCOM LAN alerts
+
+### Plug-and-play behavior
+
+- Rayhunter LAN alerts are enabled by default and use UDP broadcast on port `8096`. It sends to the configured limited-broadcast address and to the directed broadcast address of every active IPv4 LAN interface, so hotspot, USB-network, and Wi-Fi client subnets work without a receiver IP.
+- The packaged XTOC and XCOM local launchers automatically start their bundled LAN receiver. No Rayhunter IP address or destination setup is needed.
+- Each detection contains a native clear-mode X1 `T=9` Event packet. When a current GPS location exists and **Include Sentinel packet** is enabled, it also contains an X1 `T=11` Sentinel packet.
+- XTOC and XCOM show an English, latched warning with severity, heuristic, Rayhunter label, time, recording ID, and location when available. Sound and repeated attention cues remain active until **Acknowledge** is pressed.
+- Test alerts follow the complete Rayhunter encoder, LAN transport, receiver, import, and alert-UI path and are clearly marked as tests.
+- Repeated detections from the same heuristic/message are suppressed for five minutes by default. A severity increase is delivered immediately.
+
+There is no pairing step. Connect Rayhunter and the XTOC/XCOM computer to the same private Wi-Fi network, then start XTOC or XCOM with its local launcher. Rayhunter can keep its hotspot active while Wi-Fi client mode joins that network; the network SSID and password are the only one-time device-specific values required. If a computer joins Rayhunter's own hotspot instead, alerts work there too.
+
+Browser-only hosted copies cannot open a UDP socket or start the receiver themselves. Automatic receipt therefore applies to the packaged local XTOC/XCOM launchers; advanced hosted or routed deployments can supply one or more receiver URLs in **Destinations**.
+
+### Configure and test LAN delivery
+
+1. In Rayhunter, open **Config** and find **XTOC / XCOM LAN Alerts**.
+2. Leave **Send detection alerts to XTOC and XCOM** and **Automatic LAN broadcast** enabled for the default behavior.
+3. Optionally change the device label, minimum severity, included details, Sentinel packet, broadcast port, or direct receiver URLs.
+4. Select **Apply and restart**, reopen **Config**, then select **Send test alert**.
+5. Confirm that every running XTOC/XCOM client on the LAN displays a blue **Rayhunter test alert**. A real detection uses the red security-warning presentation.
+
+The delivery-status line reports the last attempt, success/error, packet correlation ID, and sent/deduplicated counters. A successful UDP send confirms that the alert left Rayhunter; the receiver UI confirms end-to-end receipt.
+
+### Live end-to-end interface
+
+These images were captured from the physical Orbic and current XTOC/XCOM builds during one end-to-end test. The Rayhunter settings page shows the default broadcast path; the matching blue panels show the same test packet received and stored by both products.
+
+![Rayhunter plug-and-play XTOC and XCOM LAN alert settings](doc/images/xsuite-lan-alert-settings.png)
+
+| XTOC receives the test packet | XCOM receives the test packet |
+| --- | --- |
+| <img src="doc/images/xtoc-rayhunter-test-alert.png" alt="XTOC displaying the Rayhunter integration test alert" width="560"> | <img src="doc/images/xcom-rayhunter-test-alert.png" alt="XCOM displaying the Rayhunter integration test alert" width="560"> |
+
+The blue presentation is reserved for the built-in integration test. An actual warning uses the red security-alert presentation and remains latched until the operator acknowledges it. Acknowledging XTOC or XCOM does not clear the physical Rayhunter screen; press a supported device button or use **Stop Alert** in Rayhunter for that separate action.
 
 ## Configure and test the alert
 
@@ -85,6 +119,22 @@ The same settings can be edited in `/data/rayhunter/config.toml`:
 [screen_alert]
 enabled = true
 message = "POSSIBLE CELL-SITE SIMULATOR DETECTED - PRESS KEY TO CLEAR"
+
+[xsuite_alerts]
+enabled = true
+broadcast_enabled = true
+broadcast_address = "255.255.255.255"
+broadcast_port = 8096
+destinations = []
+device_label = "RAYHUNTER"
+source_unit_id = 65000
+node_id = 0
+minimum_severity = "Low"
+include_sentinel_packet = true
+include_full_message = true
+dedupe_window_seconds = 300
+broadcast_repeats = 3
+broadcast_repeat_delay_ms = 750
 ```
 
 Restart Rayhunter after editing the file. Existing configurations that do not contain this section receive the default values through Serde defaults. The distribution template enables the alert by default.
@@ -95,16 +145,20 @@ See [Configuration](doc/configuration.md) for the rest of Rayhunter's settings a
 
 Both alert actions use `POST` and require no request body.
 
-| Endpoint                        | Successful result                             | Important errors                                                                            |
-| ------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `/api/test-screen-alert`        | `200 OK` after the first alert frame is drawn | `409` when disabled; `503` when unsupported/unavailable; `504` on display timeout           |
-| `/api/acknowledge-screen-alert` | `200 OK` when an active alert is cleared      | `409` when no alert is active; `503` when unsupported/unavailable; `504` on display timeout |
+| Endpoint                         | Method | Successful result                              | Important errors                                                                            |
+| -------------------------------- | ------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `/api/test-screen-alert`         | POST   | First hardware alert frame was drawn           | `409` when disabled; `503` when unsupported/unavailable; `504` on display timeout           |
+| `/api/acknowledge-screen-alert`  | POST   | Active hardware alert was cleared               | `409` when no alert is active; `503` when unsupported/unavailable; `504` on display timeout |
+| `/api/test-xsuite-alert`         | POST   | Test packet delivery attempt completed          | `409` when disabled; `503` when the alert worker is unavailable; `504` on timeout           |
+| `/api/xsuite-alert-status`       | GET    | Current delivery state and counters             | `503` when state is unavailable                                                             |
 
 Examples:
 
 ```sh
 curl -X POST http://192.168.1.1:8080/api/test-screen-alert
 curl -X POST http://192.168.1.1:8080/api/acknowledge-screen-alert
+curl -X POST http://192.168.1.1:8080/api/test-xsuite-alert
+curl http://192.168.1.1:8080/api/xsuite-alert-status
 ```
 
 Rayhunter's port 8080 web interface is plain HTTP. Treat the hotspot/LAN as a trusted local network and do not expose it directly to the public Internet.
@@ -197,7 +251,19 @@ Within one recording, Rayhunter sends a new display warning only when the maximu
 
 ### There is no phone or LAN connection in the vehicle
 
-No connection is required for the local screen alert. The web UI is needed only for configuration, testing, downloads, and remote acknowledgement. Planned Sentinel XTOC support will add optional same-LAN delivery later.
+No connection is required for the local screen alert. LAN delivery naturally requires a shared local network: either join the XTOC/XCOM computer to Rayhunter's hotspot, or enable Rayhunter Wi-Fi client mode and join both devices to the vehicle/router Wi-Fi. Internet access is not required.
+
+### XTOC or XCOM did not receive the test alert
+
+Use the packaged local launcher, keep UDP port `8096` allowed on the private Windows firewall profile, and verify both machines are on the same IPv4 broadcast domain. Guest Wi-Fi and AP/client-isolation features intentionally block device-to-device traffic. If the network is routed or broadcast is blocked, add the receiver's `http://<computer-ip>:8095` URL under **Destinations** and allow that private-LAN connection explicitly.
+
+### The delivery status says success, but no receiver alerted
+
+A UDP success means Windows/Linux accepted the outgoing datagram; UDP has no receipt acknowledgement. Confirm the XTOC/XCOM helper reports healthy at `http://127.0.0.1:8095/health`, then retry the test. XTOC/XCOM also have independent alert settings and severity filters. Test alerts bypass Rayhunter's severity/dedupe filters.
+
+### Security and privacy
+
+The zero-configuration transport is unauthenticated cleartext broadcast intended for a trusted private LAN. Anyone on that LAN may be able to read or forge an alert. Disable **Include full heuristic details**, disable LAN alerts, or use an isolated network when disclosure is a concern. Never forward UDP `8096` or the helper HTTP port to the public Internet.
 
 ### The device clock is wrong
 
@@ -217,6 +283,9 @@ The web UI may offer to copy the browser clock to Rayhunter. Clock accuracy help
 | Web UI                            | `daemon/web/src/lib/components/ConfigForm.svelte`, `daemon/web/src/lib/utils.svelte.ts` | Adds supported-device gating, enable/message controls, validation feedback, test/stop actions, and client API types/helpers.               |
 | Other framebuffer implementations | `daemon/src/display/tplink_framebuffer.rs`, `daemon/src/display/wingtech.rs`            | Explicitly pass no alert command channel, preserving existing behavior.                                                                    |
 | User documentation                | `doc/configuration.md`, `doc/using-rayhunter.md`, `README.md`                           | Documents setup, acknowledgement, re-arm behavior, installation, testing, API use, and troubleshooting.                                    |
+| Detection event extraction        | `daemon/src/analysis.rs`, `daemon/src/diag.rs`, `lib/src/analysis/analyzer.rs`           | Preserves analyzer identity/version and forwards structured warning occurrences with recording, time, and current location context.         |
+| X Suite packet sender             | `daemon/src/xsuite_alerts.rs`, `daemon/src/config.rs`                                   | Encodes native X1 Event/Sentinel packets, broadcasts them directly, retries, deduplicates, filters severity, and supports optional HTTP targets. |
+| X Suite API and web settings      | `daemon/src/server.rs`, `daemon/src/lib.rs`, `daemon/web/src/lib/`                      | Adds default-enabled controls, end-to-end test action, delivery status, API schemas, and client helpers.                                    |
 
 ## Validation completed for this fork
 

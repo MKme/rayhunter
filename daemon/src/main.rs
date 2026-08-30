@@ -15,6 +15,7 @@ mod server;
 mod stats;
 mod update;
 mod webdav;
+mod xsuite_alerts;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -29,12 +30,13 @@ use crate::pcap::get_pcap;
 use crate::qmdl_store::RecordingStore;
 use crate::server::{
     ServerState, acknowledge_screen_alert, debug_set_display_state, get_config, get_qmdl, get_time,
-    get_wifi_status, get_zip, scan_wifi, serve_static, set_config, set_time_offset,
-    test_notification, test_screen_alert,
+    get_wifi_status, get_xsuite_alert_status, get_zip, scan_wifi, serve_static, set_config,
+    set_time_offset, test_notification, test_screen_alert, test_xsuite_alert,
 };
 use crate::stats::{get_qmdl_manifest, get_system_stats, get_update_status};
 use crate::update::{UpdateStatus, run_update_check_worker};
 use crate::webdav::run_webdav_upload_worker;
+use crate::xsuite_alerts::{XsuiteAlertCommand, XsuiteAlertStatus, run_xsuite_alert_worker};
 use wifi_station::WifiStatus;
 
 use analysis::{
@@ -81,6 +83,8 @@ fn get_router() -> AppRouter {
         .route("/api/config", post(set_config))
         .route("/api/test-notification", post(test_notification))
         .route("/api/test-screen-alert", post(test_screen_alert))
+        .route("/api/test-xsuite-alert", post(test_xsuite_alert))
+        .route("/api/xsuite-alert-status", get(get_xsuite_alert_status))
         .route(
             "/api/acknowledge-screen-alert",
             post(acknowledge_screen_alert),
@@ -220,6 +224,7 @@ async fn run_with_config(
     let (ui_update_tx, ui_update_rx) = mpsc::channel::<display::DisplayState>(1);
     let (screen_alert_tx, screen_alert_rx) = mpsc::channel::<display::ScreenAlertCommand>(4);
     let (analysis_tx, analysis_rx) = mpsc::channel::<AnalysisCtrlMessage>(5);
+    let (xsuite_alert_tx, xsuite_alert_rx) = mpsc::channel::<XsuiteAlertCommand>(32);
     let restart_token = CancellationToken::new();
     let shutdown_token = restart_token.child_token();
     // Ensure shutdown_token is cancelled when this function exits for any
@@ -229,6 +234,14 @@ async fn run_with_config(
 
     let notification_service = NotificationService::new(config.ntfy_url.clone());
     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
+    let xsuite_alert_status = Arc::new(RwLock::new(XsuiteAlertStatus::default()));
+    run_xsuite_alert_worker(
+        &task_tracker,
+        shutdown_token.clone(),
+        config.xsuite_alerts.clone(),
+        xsuite_alert_rx,
+        xsuite_alert_status.clone(),
+    );
 
     let mut screen_alert_sender = None;
     if !config.debug_mode {
@@ -251,6 +264,7 @@ async fn run_with_config(
             config.min_space_to_continue_recording_mb,
             config.gps_mode,
             gps_fixed_coords,
+            Some(xsuite_alert_tx.clone()),
         );
         info!("Starting UI");
 
@@ -408,6 +422,8 @@ async fn run_with_config(
         wifi_scan_lock: tokio::sync::Mutex::new(()),
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
+        xsuite_alert_sender: Some(xsuite_alert_tx),
+        xsuite_alert_status,
     });
     run_server(&task_tracker, state, shutdown_token.clone()).await;
 

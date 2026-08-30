@@ -4632,6 +4632,7 @@ dependencies = [
  "chrono",
  "futures",
  "futures-macro",
+ "if-addrs",
  "image",
  "include_dir",
  "libc",

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
 use rayhunter::Device;
-use rayhunter::analysis::analyzer::AnalyzerConfig;
+use rayhunter::analysis::analyzer::{AnalyzerConfig, EventType};
 
 use crate::error::RayhunterError;
 
@@ -59,6 +59,52 @@ impl Default for ScreenAlertConfig {
     }
 }
 
+/// Zero-configuration XTOC/XCOM alert delivery over the local LAN.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+#[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
+pub struct XsuiteAlertsConfig {
+    /// Master switch. Enabled by default so a newly flashed device advertises detections.
+    pub enabled: bool,
+    /// UDP limited-broadcast delivery. Packaged XTOC/XCOM receivers listen automatically.
+    pub broadcast_enabled: bool,
+    pub broadcast_address: String,
+    pub broadcast_port: u16,
+    /// Optional bridge base URLs for routed/VLAN networks.
+    pub destinations: Vec<String>,
+    pub device_label: String,
+    pub source_unit_id: u16,
+    /// Zero derives a stable node id from device_label.
+    pub node_id: u32,
+    pub minimum_severity: EventType,
+    pub include_sentinel_packet: bool,
+    pub include_full_message: bool,
+    pub dedupe_window_seconds: u64,
+    pub broadcast_repeats: u8,
+    pub broadcast_repeat_delay_ms: u64,
+}
+
+impl Default for XsuiteAlertsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            broadcast_enabled: true,
+            broadcast_address: "255.255.255.255".to_string(),
+            broadcast_port: 8096,
+            destinations: Vec::new(),
+            device_label: "RAYHUNTER".to_string(),
+            source_unit_id: 65_000,
+            node_id: 0,
+            minimum_severity: EventType::Low,
+            include_sentinel_packet: true,
+            include_full_message: true,
+            dedupe_window_seconds: 300,
+            broadcast_repeats: 3,
+            broadcast_repeat_delay_ms: 750,
+        }
+    }
+}
+
 /// The structure of a valid rayhunter configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -80,6 +126,8 @@ pub struct Config {
     pub key_input_mode: KeyInputMode,
     /// Latched on-device warning alert configuration
     pub screen_alert: ScreenAlertConfig,
+    /// Native X Suite LAN alerts for XTOC and XCOM.
+    pub xsuite_alerts: XsuiteAlertsConfig,
     /// ntfy.sh URL
     pub ntfy_url: Option<String>,
     /// Vector containing the types of enabled notifications
@@ -158,6 +206,7 @@ impl Default for Config {
             colorblind_mode: false,
             key_input_mode: KeyInputMode::Disabled,
             screen_alert: ScreenAlertConfig::default(),
+            xsuite_alerts: XsuiteAlertsConfig::default(),
             analyzers: AnalyzerConfig::default(),
             ntfy_url: None,
             enabled_notifications: vec![NotificationType::Warning, NotificationType::LowBattery],

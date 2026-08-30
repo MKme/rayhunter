@@ -5,6 +5,8 @@
         test_notification,
         test_screen_alert,
         acknowledge_screen_alert,
+        test_xsuite_alert,
+        get_xsuite_alert_status,
         get_wifi_status,
         scan_wifi_networks,
         GpsMode,
@@ -12,6 +14,7 @@
         type Config,
         type WifiStatus,
         type WifiNetwork,
+        type XsuiteAlertStatus,
     } from '../utils.svelte';
     import Modal from './Modal.svelte';
     import ExpandableInput from './ExpandableInput.svelte';
@@ -35,12 +38,23 @@
     let scanning = $state(false);
     let scanResults = $state<WifiNetwork[]>([]);
     let dnsServersInput = $state('');
+    let xsuiteDestinationsInput = $state('');
+    let testingXsuiteAlert = $state(false);
+    let xsuiteTestMessage = $state('');
+    let xsuiteTestMessageType = $state<'success' | 'error' | null>(null);
+    let xsuiteStatus = $state<XsuiteAlertStatus | null>(null);
 
     async function load_config() {
         try {
             loading = true;
             config = await get_config();
             dnsServersInput = config.dns_servers ? config.dns_servers.join(', ') : '';
+            xsuiteDestinationsInput = config.xsuite_alerts.destinations.join('\n');
+            try {
+                xsuiteStatus = await get_xsuite_alert_status();
+            } catch {
+                xsuiteStatus = null;
+            }
             message = '';
             messageType = null;
             screenAlertMessage = '';
@@ -65,6 +79,10 @@
                       .map((s) => s.trim())
                       .filter((s) => s.length > 0)
                 : null;
+        config.xsuite_alerts.destinations = xsuiteDestinationsInput
+            .split(/[\n,]/)
+            .map((value) => value.trim())
+            .filter((value) => value.length > 0);
 
         try {
             saving = true;
@@ -136,6 +154,23 @@
             testMessageType = 'error';
         } finally {
             testingNotification = false;
+        }
+    }
+
+    async function send_test_xsuite_alert() {
+        try {
+            testingXsuiteAlert = true;
+            xsuiteTestMessage = '';
+            xsuiteTestMessageType = null;
+            const report = await test_xsuite_alert();
+            xsuiteTestMessage = `Test alert sent (${report.packet_count} packet${report.packet_count === 1 ? '' : 's'}, ${report.broadcast_datagrams} LAN broadcast${report.broadcast_datagrams === 1 ? '' : 's'}). Correlation ${report.correlation_id}.`;
+            xsuiteTestMessageType = 'success';
+            xsuiteStatus = await get_xsuite_alert_status();
+        } catch (error) {
+            xsuiteTestMessage = `Test failed: ${error}`;
+            xsuiteTestMessageType = 'error';
+        } finally {
+            testingXsuiteAlert = false;
         }
     }
 
@@ -348,8 +383,175 @@
                     </div>
                 </div>
 
+                <div class="border-t border-gray-200 pt-4 mt-6 space-y-4">
+                    <div>
+                        <h3 class="text-lg font-semibold text-gray-800">XTOC / XCOM LAN Alerts</h3>
+                        <p class="text-xs text-gray-500 mt-1">
+                            Plug-and-play is enabled by default. Rayhunter broadcasts native X1
+                            EVENT packets on the local LAN; a current XTOC or XCOM local launcher
+                            receives and displays them automatically. Internet access is not needed.
+                        </p>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input
+                            id="xsuite_alerts_enabled"
+                            type="checkbox"
+                            bind:checked={config.xsuite_alerts.enabled}
+                            class="h-4 w-4 text-rayhunter-blue focus:ring-rayhunter-blue border-gray-300 rounded-sm"
+                        />
+                        <label for="xsuite_alerts_enabled" class="ml-2 block text-sm text-gray-700">
+                            Send detection alerts to XTOC and XCOM
+                        </label>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input
+                            id="xsuite_broadcast_enabled"
+                            type="checkbox"
+                            bind:checked={config.xsuite_alerts.broadcast_enabled}
+                            class="h-4 w-4 text-rayhunter-blue focus:ring-rayhunter-blue border-gray-300 rounded-sm"
+                        />
+                        <label for="xsuite_broadcast_enabled" class="ml-2 block text-sm text-gray-700">
+                            Automatic LAN broadcast (recommended)
+                        </label>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label for="xsuite_device_label" class="block text-sm font-medium text-gray-700 mb-1">
+                                Device label
+                            </label>
+                            <input
+                                id="xsuite_device_label"
+                                type="text"
+                                maxlength="32"
+                                bind:value={config.xsuite_alerts.device_label}
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-hidden focus:ring-2 focus:ring-rayhunter-blue"
+                            />
+                        </div>
+                        <div>
+                            <label for="xsuite_minimum_severity" class="block text-sm font-medium text-gray-700 mb-1">
+                                Minimum severity
+                            </label>
+                            <select
+                                id="xsuite_minimum_severity"
+                                bind:value={config.xsuite_alerts.minimum_severity}
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-hidden focus:ring-2 focus:ring-rayhunter-blue"
+                            >
+                                <option value="Low">Low and above</option>
+                                <option value="Medium">Medium and above</option>
+                                <option value="High">High only</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="xsuite_source_unit" class="block text-sm font-medium text-gray-700 mb-1">
+                                X Suite source unit ID
+                            </label>
+                            <input
+                                id="xsuite_source_unit"
+                                type="number"
+                                min="1"
+                                max="65535"
+                                bind:value={config.xsuite_alerts.source_unit_id}
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-hidden focus:ring-2 focus:ring-rayhunter-blue"
+                            />
+                        </div>
+                        <div>
+                            <label for="xsuite_broadcast_port" class="block text-sm font-medium text-gray-700 mb-1">
+                                LAN alert port
+                            </label>
+                            <input
+                                id="xsuite_broadcast_port"
+                                type="number"
+                                min="1"
+                                max="65535"
+                                bind:value={config.xsuite_alerts.broadcast_port}
+                                class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-hidden focus:ring-2 focus:ring-rayhunter-blue"
+                            />
+                        </div>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input
+                            id="xsuite_include_sentinel"
+                            type="checkbox"
+                            bind:checked={config.xsuite_alerts.include_sentinel_packet}
+                            class="h-4 w-4 text-rayhunter-blue focus:ring-rayhunter-blue border-gray-300 rounded-sm"
+                        />
+                        <label for="xsuite_include_sentinel" class="ml-2 block text-sm text-gray-700">
+                            Also send a Sentinel packet when valid GPS coordinates are available
+                        </label>
+                    </div>
+
+                    <div class="flex items-center">
+                        <input
+                            id="xsuite_include_message"
+                            type="checkbox"
+                            bind:checked={config.xsuite_alerts.include_full_message}
+                            class="h-4 w-4 text-rayhunter-blue focus:ring-rayhunter-blue border-gray-300 rounded-sm"
+                        />
+                        <label for="xsuite_include_message" class="ml-2 block text-sm text-gray-700">
+                            Include full detection details on the LAN
+                        </label>
+                    </div>
+
+                    <div>
+                        <label for="xsuite_destinations" class="block text-sm font-medium text-gray-700 mb-1">
+                            Optional direct receiver URLs
+                        </label>
+                        <textarea
+                            id="xsuite_destinations"
+                            rows="2"
+                            bind:value={xsuiteDestinationsInput}
+                            placeholder="http://192.168.50.10:8095"
+                            class="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-hidden focus:ring-2 focus:ring-rayhunter-blue"
+                        ></textarea>
+                        <p class="text-xs text-gray-500 mt-1">
+                            Usually leave this blank. Add one URL per line only for routed networks
+                            that block LAN broadcasts.
+                        </p>
+                    </div>
+
+                    <div class="flex flex-wrap items-center gap-3">
+                        <button
+                            type="button"
+                            onclick={send_test_xsuite_alert}
+                            disabled={testingXsuiteAlert}
+                            class="bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-md"
+                        >
+                            {testingXsuiteAlert ? 'Sending test...' : 'Send XTOC / XCOM Test Alert'}
+                        </button>
+                        {#if xsuiteStatus}
+                            <span class="text-xs text-gray-500">
+                                Sent: {xsuiteStatus.sent_alerts} &middot; Deduplicated: {xsuiteStatus.deduped_alerts}
+                                {#if xsuiteStatus.last_success_at}
+                                    &middot; Last success: {new Date(xsuiteStatus.last_success_at).toLocaleString()}
+                                {/if}
+                                {#if xsuiteStatus.last_error}
+                                    &middot; Last error: {xsuiteStatus.last_error}
+                                {/if}
+                            </span>
+                        {/if}
+                    </div>
+                    <p class="text-xs text-amber-700">
+                        The test uses the currently saved settings. Save and let Rayhunter restart
+                        before testing changes made above.
+                    </p>
+                    {#if xsuiteTestMessage}
+                        <div
+                            aria-live="polite"
+                            class="p-2 rounded-sm text-sm {xsuiteTestMessageType === 'error'
+                                ? 'bg-red-100 text-red-700'
+                                : 'bg-green-100 text-green-700'}"
+                        >
+                            {xsuiteTestMessage}
+                        </div>
+                    {/if}
+                </div>
+
                 <div class="border-t border-gray-200 pt-4 mt-6 space-y-3">
-                    <h3 class="text-lg font-semibold text-gray-800 mb-4">Notification Settings</h3>
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">Other Notifications</h3>
 
                     <div class="flex items-center">
                         <input

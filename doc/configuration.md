@@ -12,6 +12,7 @@ Through web UI you can set:
   - *EFF logo*, which shows EFF logo *and* colored line.
   - *High visibility (full screen color)*: fills the entire screen with the status color (green for recording, red for warnings, white for paused).
 - **Screen Warning Alert** (Orbic/Moxee) wakes the display and flashes a configurable message when a heuristic warning is detected. The alert remains latched until a physical device button is pressed or **Stop Alert** is selected in the web UI. Acknowledging the screen does not stop recording or delete the warning. **Test Screen Alert** exercises the same wake, flash, and acknowledgement path without creating a detection.
+- **XTOC / XCOM LAN Alerts** sends detections directly to XTOC and XCOM on the same private LAN. It is enabled by default and needs no receiver address: Rayhunter broadcasts on UDP port `8096`, while the packaged XTOC/XCOM local launcher starts its receiver automatically. You can change the device label and minimum severity, hide full heuristic details, omit the optional Sentinel packet, change the port, add direct receiver URLs for routed networks, or disable delivery. **Send test alert** exercises packet encoding, transport, receiver import, and the XTOC/XCOM alert UI without creating a Rayhunter detection.
 - **Device Input Mode**, which defines behavior of built-in power button of the device. *Device Input Mode* could be:
   - *Disable button control*: built-in power button of the device is not used by Rayhunter.
   - *Double-tap power button to start new recording*: double clicking on a built-in power button of the device stops and immediately restarts the recording. This could be useful if Rayhunter's heuristics is triggered and you get the red line, and you want to "reset" the past warnings. Normally you can do that through web UI, but sometimes it is easier to double tap on power button.
@@ -31,6 +32,34 @@ The alert message is converted to uppercase and rendered with a compact bitmap f
 enabled = true
 message = "POSSIBLE CELL-SITE SIMULATOR DETECTED - PRESS KEY TO CLEAR"
 ```
+
+The default X Suite settings are:
+
+```toml
+[xsuite_alerts]
+enabled = true
+broadcast_enabled = true
+broadcast_address = "255.255.255.255"
+broadcast_port = 8096
+destinations = []
+device_label = "RAYHUNTER"
+source_unit_id = 65000
+node_id = 0
+minimum_severity = "Low"
+include_sentinel_packet = true
+include_full_message = true
+dedupe_window_seconds = 300
+broadcast_repeats = 3
+broadcast_repeat_delay_ms = 750
+```
+
+`minimum_severity` is one of `Informational`, `Low`, `Medium`, or `High`. A `node_id` of `0` derives a stable ID from `device_label`. The optional `destinations` entries are helper base URLs such as `http://192.168.50.10:8095`; Rayhunter posts to each URL's `/send` endpoint in addition to broadcast. The same heuristic/message is deduplicated for the configured interval unless its severity increases.
+
+For automatic delivery, Rayhunter sends to `broadcast_address` and also discovers the directed broadcast address for every active, non-loopback IPv4 interface. This allows the default to work on hotspot, USB-network, and Wi-Fi client subnets even when the operating system has no route for the generic `255.255.255.255` target.
+
+X1 Event packets are always included. X1 Sentinel packets are included only when enabled and a valid current GPS fix exists. The receiver metadata includes the severity, heuristic/version, message (unless hidden), Rayhunter label, recording ID, occurrence time, test flag, and coordinates when available.
+
+This zero-configuration mode uses unauthenticated cleartext LAN traffic. Use it only on a trusted private network, and do not expose either port to the Internet.
 
 ## GPS
 

@@ -54,6 +54,25 @@ wifi_enabled = false
 enabled = true
 message = "POSSIBLE CELL-SITE SIMULATOR DETECTED - PRESS KEY TO CLEAR"
 
+# Plug-and-play XTOC/XCOM alerts over the local LAN.
+# XTOC and XCOM local launchers automatically listen for these broadcasts.
+[xsuite_alerts]
+enabled = true
+broadcast_enabled = true
+broadcast_address = "255.255.255.255"
+broadcast_port = 8096
+destinations = []
+device_label = "RAYHUNTER"
+source_unit_id = 65000
+# 0 derives a stable node id from device_label.
+node_id = 0
+minimum_severity = "Low"
+include_sentinel_packet = true
+include_full_message = true
+dedupe_window_seconds = 300
+broadcast_repeats = 3
+broadcast_repeat_delay_ms = 750
+
 # WebDAV Upload
 # If a [webdav] section is present, finished recordings (both the raw .qmdl file
 # and its .ndjson analysis output) are uploaded in the background to a WebDAV

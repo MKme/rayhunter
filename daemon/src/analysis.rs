@@ -6,6 +6,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono::{DateTime, FixedOffset};
 use log::{error, info};
 use rayhunter::analysis::analyzer::{AnalyzerConfig, EventType, Harness};
 use rayhunter::diag::{DiagParsingError, Message, MessagesContainer};
@@ -23,6 +24,22 @@ use crate::server::ServerState;
 pub struct AnalysisWriter {
     writer: BufWriter<File>,
     harness: Harness,
+    analyzers: Vec<(String, u32)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DetectionEvent {
+    pub severity: EventType,
+    pub analyzer_name: String,
+    pub analyzer_version: u32,
+    pub message: String,
+    pub packet_timestamp: Option<DateTime<FixedOffset>>,
+}
+
+#[derive(Debug)]
+pub struct AnalysisBatchResult {
+    pub max_type: EventType,
+    pub detections: Vec<DetectionEvent>,
 }
 
 // We write our analysis results to a file immediately to minimize the amount of
@@ -35,30 +52,57 @@ impl AnalysisWriter {
     pub async fn new(file: File, analyzer_config: &AnalyzerConfig) -> Result<Self, std::io::Error> {
         let harness = Harness::new_with_config(analyzer_config);
 
+        let metadata = harness.get_metadata();
+        let analyzers = metadata
+            .analyzers
+            .iter()
+            .map(|analyzer| (analyzer.name.clone(), analyzer.version))
+            .collect();
         let mut result = Self {
             writer: BufWriter::new(file),
             harness,
+            analyzers,
         };
-        let metadata = result.harness.get_metadata();
         result.write(&metadata).await?;
         Ok(result)
     }
 
-    // Runs the analysis harness on the given container, serializing the results
-    // to the analysis file, returning the whether any warnings were detected
+    // Runs the analysis harness, writes report rows, and returns structured detections.
     pub async fn analyze_container(
         &mut self,
         container: MessagesContainer,
-    ) -> Result<EventType, std::io::Error> {
+    ) -> Result<AnalysisBatchResult, std::io::Error> {
         let mut max_type = EventType::Informational;
+        let mut detections = Vec::new();
 
         for row in self.harness.analyze_qmdl_messages(container) {
+            for (index, event) in row.events.iter().enumerate() {
+                let Some(event) = event else { continue };
+                if event.event_type == EventType::Informational {
+                    continue;
+                }
+                let (analyzer_name, analyzer_version) = self
+                    .analyzers
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| (format!("Analyzer {}", index + 1), 0));
+                detections.push(DetectionEvent {
+                    severity: event.event_type,
+                    analyzer_name,
+                    analyzer_version,
+                    message: event.message.clone(),
+                    packet_timestamp: row.packet_timestamp,
+                });
+            }
             if !row.is_empty() {
                 self.write(&row).await?;
             }
             max_type = cmp::max(max_type, row.get_max_event_type());
         }
-        Ok(max_type)
+        Ok(AnalysisBatchResult {
+            max_type,
+            detections,
+        })
     }
 
     pub async fn analyze_message(

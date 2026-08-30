@@ -15,6 +15,7 @@ pub mod server;
 pub mod stats;
 pub mod update;
 pub mod webdav;
+pub mod xsuite_alerts;
 
 #[cfg(feature = "apidocs")]
 use utoipa::OpenApi;
@@ -50,6 +51,8 @@ use utoipa::OpenApi;
         server::test_notification,
         server::test_screen_alert,
         server::acknowledge_screen_alert,
+        server::test_xsuite_alert,
+        server::get_xsuite_alert_status,
         server::get_time,
         server::set_time_offset,
         server::debug_set_display_state,

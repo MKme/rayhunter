@@ -37,6 +37,7 @@ use crate::notifications::DEFAULT_NOTIFICATION_TIMEOUT;
 use crate::pcap::{generate_pcap_data, load_gps_records_for_entry};
 use crate::qmdl_store::{FileKind, RecordingStore};
 use crate::update::UpdateStatus;
+use crate::xsuite_alerts::{DetectionOccurrence, XsuiteAlertCommand, XsuiteAlertStatus};
 
 const SCREEN_ALERT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -54,6 +55,8 @@ pub struct ServerState {
     pub wifi_scan_lock: tokio::sync::Mutex<()>,
     pub gps_state: Arc<RwLock<Option<GpsData>>>,
     pub update_status_lock: Arc<RwLock<UpdateStatus>>,
+    pub xsuite_alert_sender: Option<Sender<XsuiteAlertCommand>>,
+    pub xsuite_alert_status: Arc<RwLock<XsuiteAlertStatus>>,
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -385,6 +388,88 @@ pub async fn test_notification(
             format!("Failed to send test notification: {e}"),
         )
     })
+}
+
+#[cfg_attr(feature = "apidocs", utoipa::path(
+    post,
+    path = "/api/test-xsuite-alert",
+    tag = "Configuration",
+    responses(
+        (status = StatusCode::OK, description = "Test alert delivered"),
+        (status = StatusCode::CONFLICT, description = "X Suite alerts are disabled"),
+        (status = StatusCode::SERVICE_UNAVAILABLE, description = "Alert worker unavailable")
+    ),
+    summary = "Test native XTOC/XCOM LAN alert delivery"
+))]
+pub async fn test_xsuite_alert(
+    State(state): State<Arc<ServerState>>,
+) -> Result<Json<crate::xsuite_alerts::DeliveryReport>, (StatusCode, String)> {
+    if !state.config.xsuite_alerts.enabled {
+        return Err((
+            StatusCode::CONFLICT,
+            "X Suite LAN alerts are disabled".to_string(),
+        ));
+    }
+    let sender = state.xsuite_alert_sender.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "X Suite alert worker is unavailable".to_string(),
+    ))?;
+    let location = match (
+        state.config.gps_mode,
+        state.config.gps_fixed_latitude,
+        state.config.gps_fixed_longitude,
+    ) {
+        (GpsMode::Fixed, Some(lat), Some(lon)) => Some((lat, lon)),
+        _ => state
+            .gps_state
+            .read()
+            .await
+            .as_ref()
+            .map(|gps| (gps.latitude, gps.longitude)),
+    };
+    let (response_tx, response_rx) = oneshot::channel();
+    sender
+        .send(XsuiteAlertCommand::Test {
+            occurrence: DetectionOccurrence::test(location),
+            response_tx,
+        })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "X Suite alert worker stopped".to_string(),
+            )
+        })?;
+    let result = tokio::time::timeout(Duration::from_secs(10), response_rx)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                "X Suite alert delivery timed out".to_string(),
+            )
+        })?
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "X Suite alert worker did not respond".to_string(),
+            )
+        })?;
+    result
+        .map(Json)
+        .map_err(|error| (StatusCode::BAD_GATEWAY, error))
+}
+
+#[cfg_attr(feature = "apidocs", utoipa::path(
+    get,
+    path = "/api/xsuite-alert-status",
+    tag = "Configuration",
+    responses((status = StatusCode::OK, body = XsuiteAlertStatus)),
+    summary = "Show native XTOC/XCOM LAN alert status"
+))]
+pub async fn get_xsuite_alert_status(
+    State(state): State<Arc<ServerState>>,
+) -> Json<XsuiteAlertStatus> {
+    Json(state.xsuite_alert_status.read().await.clone())
 }
 
 /// Response for GET /api/time
@@ -746,6 +831,8 @@ mod tests {
             wifi_scan_lock: tokio::sync::Mutex::new(()),
             gps_state: Arc::new(RwLock::new(None)),
             update_status_lock: Arc::new(RwLock::new(UpdateStatus::default())),
+            xsuite_alert_sender: None,
+            xsuite_alert_status: Arc::new(RwLock::new(XsuiteAlertStatus::default())),
         })
     }
 

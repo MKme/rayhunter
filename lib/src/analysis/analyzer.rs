@@ -144,7 +144,7 @@ pub trait Analyzer {
 }
 
 /// Specific information on a given analyzer
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
 pub struct AnalyzerMetadata {
     /// The analyzer name

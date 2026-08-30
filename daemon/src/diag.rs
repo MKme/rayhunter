@@ -34,8 +34,10 @@ use crate::notifications::{Notification, NotificationType};
 use crate::qmdl_store::{FileKind, RecordingStore, RecordingStoreError};
 use crate::server::ServerState;
 use crate::stats::DiskStats;
+use crate::xsuite_alerts::{DetectionOccurrence, XsuiteAlertCommand};
 
 const DISK_CHECK_BYTES_INTERVAL: usize = 256 * 1024;
+const ALERT_GPS_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 
 pub enum DiagDeviceCtrlMessage {
     StopRecording,
@@ -70,6 +72,8 @@ pub struct DiagTask {
     bytes_since_space_check: usize,
     low_space_warned: bool,
     latest_packet_timestamp: Option<i64>,
+    latest_gps_coords: Option<(f64, f64, std::time::Instant)>,
+    xsuite_alert_sender: Option<Sender<XsuiteAlertCommand>>,
 }
 
 enum DiagState {
@@ -117,6 +121,7 @@ impl DiagTask {
         min_space_to_continue_mb: u64,
         gps_mode: GpsMode,
         gps_fixed_coords: Option<(f64, f64)>,
+        xsuite_alert_sender: Option<Sender<XsuiteAlertCommand>>,
     ) -> Self {
         Self {
             ui_update_sender,
@@ -132,6 +137,9 @@ impl DiagTask {
             bytes_since_space_check: 0,
             low_space_warned: false,
             latest_packet_timestamp: None,
+            latest_gps_coords: gps_fixed_coords
+                .map(|(lat, lon)| (lat, lon, std::time::Instant::now())),
+            xsuite_alert_sender,
         }
     }
 
@@ -263,6 +271,7 @@ impl DiagTask {
     }
 
     async fn handle_gps_update(&mut self, qmdl_store: &RecordingStore, lat: f64, lon: f64) {
+        self.latest_gps_coords = Some((lat, lon, std::time::Instant::now()));
         let Some((entry_idx, _)) = qmdl_store.get_current_entry() else {
             info!("GPS update received but no recording active, not writing to storage");
             return;
@@ -331,6 +340,18 @@ impl DiagTask {
             debug!("skipping non-userspace diag messages...");
             return;
         }
+        let recording_id = qmdl_store
+            .get_current_entry()
+            .map(|(_, entry)| entry.name.clone())
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        let alert_location = match (self.gps_mode, self.latest_gps_coords) {
+            (GpsMode::Fixed, Some((lat, lon, _))) => Some((lat, lon)),
+            (GpsMode::Api, Some((lat, lon, seen_at))) if seen_at.elapsed() <= ALERT_GPS_MAX_AGE => {
+                Some((lat, lon))
+            }
+            _ => None,
+        };
+        let xsuite_alert_sender = self.xsuite_alert_sender.clone();
         // keep track of how many bytes were written to the QMDL file so we can read
         // a valid block of data from it in the HTTP server
         if let DiagState::Recording {
@@ -415,13 +436,38 @@ impl DiagTask {
 
             let container_bytes: usize = container.messages.iter().map(|m| m.data.len()).sum();
             self.bytes_since_space_check += container_bytes;
-            let max_type = match analysis_writer.analyze_container(container).await {
-                Ok(t) => t,
+            let analysis_result = match analysis_writer.analyze_container(container).await {
+                Ok(result) => result,
                 Err(e) => {
                     warn!("failed to analyze container: {e}");
-                    EventType::Informational
+                    crate::analysis::AnalysisBatchResult {
+                        max_type: EventType::Informational,
+                        detections: Vec::new(),
+                    }
                 }
             };
+            let max_type = analysis_result.max_type;
+
+            if let Some(sender) = xsuite_alert_sender {
+                for detection in analysis_result.detections {
+                    if let Err(error) = sender
+                        .send(XsuiteAlertCommand::Detection(DetectionOccurrence {
+                            severity: detection.severity,
+                            analyzer_name: detection.analyzer_name,
+                            analyzer_version: detection.analyzer_version,
+                            message: detection.message,
+                            packet_timestamp: detection.packet_timestamp,
+                            recording_id: recording_id.clone(),
+                            location: alert_location,
+                            test: false,
+                        }))
+                        .await
+                    {
+                        warn!("failed to queue X Suite LAN alert: {error}");
+                        break;
+                    }
+                }
+            }
 
             if max_type > EventType::Informational {
                 info!("a heuristic triggered on this run!");
@@ -467,6 +513,7 @@ pub fn run_diag_read_thread(
     min_space_to_continue_mb: u64,
     gps_mode: GpsMode,
     gps_fixed_coords: Option<(f64, f64)>,
+    xsuite_alert_sender: Option<Sender<XsuiteAlertCommand>>,
 ) {
     task_tracker.spawn(async move {
         info!("Using configuration for device: {0:?}", device);
@@ -485,6 +532,7 @@ pub fn run_diag_read_thread(
             min_space_to_continue_mb,
             gps_mode,
             gps_fixed_coords,
+            xsuite_alert_sender,
         );
         qmdl_file_tx
             .send(DiagDeviceCtrlMessage::StartRecording { response_tx: None })

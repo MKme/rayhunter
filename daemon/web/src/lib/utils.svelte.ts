@@ -34,6 +34,42 @@ export interface ScreenAlertConfig {
     message: string;
 }
 
+export type DetectionSeverity = 'Informational' | 'Low' | 'Medium' | 'High';
+
+export interface XsuiteAlertsConfig {
+    enabled: boolean;
+    broadcast_enabled: boolean;
+    broadcast_address: string;
+    broadcast_port: number;
+    destinations: string[];
+    device_label: string;
+    source_unit_id: number;
+    node_id: number;
+    minimum_severity: DetectionSeverity;
+    include_sentinel_packet: boolean;
+    include_full_message: boolean;
+    dedupe_window_seconds: number;
+    broadcast_repeats: number;
+    broadcast_repeat_delay_ms: number;
+}
+
+export interface XsuiteAlertStatus {
+    enabled: boolean;
+    last_attempt_at: string | null;
+    last_success_at: string | null;
+    last_error: string | null;
+    last_correlation_id: string | null;
+    sent_alerts: number;
+    deduped_alerts: number;
+}
+
+export interface XsuiteDeliveryReport {
+    correlation_id: string;
+    packet_count: number;
+    broadcast_datagrams: number;
+    http_destinations: number;
+}
+
 export enum GpsMode {
     Disabled = 0,
     Fixed = 1,
@@ -57,6 +93,7 @@ export interface Config {
     colorblind_mode: boolean;
     key_input_mode: number;
     screen_alert: ScreenAlertConfig;
+    xsuite_alerts: XsuiteAlertsConfig;
     ntfy_url: string | null;
     enabled_notifications: enabled_notifications[];
     auto_check_updates: boolean;
@@ -178,6 +215,14 @@ export async function test_screen_alert(): Promise<void> {
 
 export async function acknowledge_screen_alert(): Promise<void> {
     await req('POST', '/api/acknowledge-screen-alert');
+}
+
+export async function test_xsuite_alert(): Promise<XsuiteDeliveryReport> {
+    return JSON.parse(await req('POST', '/api/test-xsuite-alert'));
+}
+
+export async function get_xsuite_alert_status(): Promise<XsuiteAlertStatus> {
+    return JSON.parse(await req('GET', '/api/xsuite-alert-status'));
 }
 
 export interface TimeResponse {
