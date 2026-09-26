@@ -59,6 +59,7 @@ pub enum DiagDeviceCtrlMessage {
 }
 
 pub struct DiagTask {
+    tactical_stats: display::tactical::SharedStats,
     ui_update_sender: Sender<display::DisplayState>,
     analysis_sender: Sender<AnalysisCtrlMessage>,
     analyzer_config: AnalyzerConfig,
@@ -122,8 +123,10 @@ impl DiagTask {
         gps_mode: GpsMode,
         gps_fixed_coords: Option<(f64, f64)>,
         xsuite_alert_sender: Option<Sender<XsuiteAlertCommand>>,
+        tactical_stats: display::tactical::SharedStats,
     ) -> Self {
         Self {
+            tactical_stats,
             ui_update_sender,
             analysis_sender,
             analyzer_config,
@@ -202,6 +205,10 @@ impl DiagTask {
             qmdl_writer,
             analysis_writer: Box::new(analysis_writer),
         };
+        self.tactical_stats
+            .lock()
+            .unwrap()
+            .start(std::time::Instant::now());
 
         if let Err(e) = self
             .ui_update_sender
@@ -304,6 +311,10 @@ impl DiagTask {
     }
 
     async fn stop_current_recording(&mut self, qmdl_store: &mut RecordingStore) {
+        self.tactical_stats
+            .lock()
+            .unwrap()
+            .stop(std::time::Instant::now());
         let mut state = DiagState::Stopped;
         std::mem::swap(&mut self.state, &mut state);
         if let DiagState::Recording {
@@ -435,10 +446,17 @@ impl DiagTask {
             }
 
             let container_bytes: usize = container.messages.iter().map(|m| m.data.len()).sum();
+            if container_bytes > 0 {
+                self.tactical_stats
+                    .lock()
+                    .unwrap()
+                    .receive(std::time::Instant::now());
+            }
             self.bytes_since_space_check += container_bytes;
             let analysis_result = match analysis_writer.analyze_container(container).await {
                 Ok(result) => result,
                 Err(e) => {
+                    self.tactical_stats.lock().unwrap().analysis_failed = true;
                     warn!("failed to analyze container: {e}");
                     crate::analysis::AnalysisBatchResult {
                         max_type: EventType::Informational,
@@ -447,6 +465,18 @@ impl DiagTask {
                 }
             };
             let max_type = analysis_result.max_type;
+
+            {
+                let mut stats = self.tactical_stats.lock().unwrap();
+                for detection in &analysis_result.detections {
+                    match detection.severity {
+                        EventType::Low => stats.detect(0),
+                        EventType::Medium => stats.detect(1),
+                        EventType::High => stats.detect(2),
+                        EventType::Informational => {}
+                    }
+                }
+            }
 
             if let Some(sender) = xsuite_alert_sender {
                 for detection in analysis_result.detections {
@@ -514,8 +544,10 @@ pub fn run_diag_read_thread(
     gps_mode: GpsMode,
     gps_fixed_coords: Option<(f64, f64)>,
     xsuite_alert_sender: Option<Sender<XsuiteAlertCommand>>,
+    tactical_stats: display::tactical::SharedStats,
 ) {
     task_tracker.spawn(async move {
+        let _capture_guard = display::tactical::CaptureGuard(tactical_stats.clone());
         info!("Using configuration for device: {0:?}", device);
         let mut dev = DiagDevice::new(&device)
             .await?;
@@ -533,6 +565,7 @@ pub fn run_diag_read_thread(
             gps_mode,
             gps_fixed_coords,
             xsuite_alert_sender,
+            tactical_stats,
         );
         qmdl_file_tx
             .send(DiagDeviceCtrlMessage::StartRecording { response_tx: None })
@@ -545,6 +578,9 @@ pub fn run_diag_read_thread(
                         Some(DiagDeviceCtrlMessage::StartRecording { response_tx }) => {
                             let mut qmdl_store = qmdl_store_lock.write().await;
                             let result = diag_task.start(qmdl_store.deref_mut()).await;
+                            if result.is_err() && matches!(diag_task.state, DiagState::Stopped) {
+                                diag_task.tactical_stats.lock().unwrap().stop(std::time::Instant::now());
+                            }
                             if let Some(tx) = response_tx {
                                 tx.send(result).ok();
                             }

@@ -100,6 +100,11 @@ pub trait GenericFramebuffer: Send + 'static {
     /// Restore display/backlight state after acknowledgement.
     async fn end_screen_alert(&mut self) {}
 
+    /// Returns true when this device supports the full tactical dashboard.
+    async fn draw_tactical(&mut self) -> bool {
+        false
+    }
+
     async fn write_dynamic_image(&mut self, img: DynamicImage) {
         let dimensions = self.dimensions();
         let mut width = img.width();
@@ -228,7 +233,12 @@ pub fn update_ui(
             );
         }
         let mut alert = ScreenAlertController::new(screen_alert_enabled);
-        let mut normal_ticker = tokio::time::interval(Duration::from_millis(NORMAL_REFRESH_RATE));
+        let refresh_rate = if display_level == UiLevel::Tactical {
+            250
+        } else {
+            NORMAL_REFRESH_RATE
+        };
+        let mut normal_ticker = tokio::time::interval(Duration::from_millis(refresh_rate));
         normal_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut alert_ticker = tokio::time::interval(Duration::from_millis(ALERT_FLASH_RATE));
         alert_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -292,6 +302,9 @@ pub fn update_ui(
                     }
                     let mut status_bar_height = 2;
                     match display_level {
+                        UiLevel::Tactical => {
+                            if fb.draw_tactical().await { continue; }
+                        }
                         UiLevel::Demo => fb.draw_gif(img.unwrap()).await,
                         UiLevel::EffLogo => fb.draw_img(img.unwrap()).await,
                         UiLevel::HighVisibility => {

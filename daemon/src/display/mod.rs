@@ -2,8 +2,10 @@ use rayhunter::analysis::analyzer::EventType;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+mod bitmap_font;
 mod generic_framebuffer;
 pub mod screen_alert;
+pub mod tactical;
 
 pub mod headless;
 pub mod orbic;

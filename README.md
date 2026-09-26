@@ -8,6 +8,91 @@ Rayhunter is a project for detecting IMSI catchers, also known as cell-site simu
 
 This fork is based on Rayhunter 0.12.0 and adds a **latched, on-device warning screen** for Orbic RC400L and Moxee hardware plus **plug-and-play XTOC/XCOM LAN alerts**. A heuristic detection can wake a sleeping display and flash a plain-English alert until someone acknowledges it on the device. When Rayhunter and XTOC/XCOM share a LAN, the same detection is also broadcast directly as native X1 Event and optional Sentinel packets. No Internet service, cloud account, or separate message broker is involved.
 
+## Tactical LCD dashboard
+
+Select **Config → Device UI Level → Tactical dashboard (Orbic / Moxee)** and
+**Apply and restart**. The equivalent setting is `ui_level = 5`. The display
+replaces hotspot data-usage figures with recording status, detection counts,
+traffic freshness, battery state, and configuration addresses.
+
+### Screens from the connected device
+
+This camera photo shows the tactical recording page running on the physical
+Orbic LCD. It confirms the live page is readable on the device; the zero-alert
+count is a session status, not a claim that the cellular network is safe.
+
+<img src="doc/images/tactical-lcd-device-recording.png" alt="Physical Orbic running the Rayhunter tactical recording page with session counts, radio freshness, battery charging state, and LAN and USB configuration addresses" width="480">
+
+The remaining images are actual 128 × 128 framebuffer captures from the same
+device, enlarged without smoothing. The warning image is a **screen-only test**,
+not a recorded detection.
+
+| Recording dashboard | Paused recording |
+| --- | --- |
+| <img src="doc/images/tactical-lcd-recording.png" alt="Actual Orbic tactical LCD recording with zero alerts, battery and both configuration IP addresses" width="320"> | <img src="doc/images/tactical-lcd-paused.png" alt="Actual Orbic tactical LCD paused with last-run counts retained" width="320"> |
+| **SESSION** counts and live traffic age. | **LAST RUN** counts remain; the run timer stops. |
+
+| Waiting for the first data after starting | Flashing warning — screen test |
+| --- | --- |
+| <img src="doc/images/tactical-lcd-wait-data.png" alt="Actual Orbic tactical LCD waiting for diagnostic data immediately after starting a new recording" width="320"> | <img src="doc/images/tactical-lcd-warning.png" alt="Actual Orbic full-screen warning during a screen-only test" width="320"> |
+| **WAIT DATA** and **RX NONE** avoid implying traffic has arrived. | The warning takes priority until acknowledged; recording continues. |
+
+The service-based wake fix passed a 35-second alert test. This framebuffer is
+from the final build's additional web-clear check. The camera photo above
+confirms the tactical recording page on the physical LCD; physical-button clear
+coverage is tracked separately in the [validation record](doc/tactical-lcd-validation.md).
+
+<img src="doc/images/tactical-lcd-after-clear.png" alt="Actual revised-firmware framebuffer after clearing the alert, with the recording dashboard restored" width="320">
+
+### Reading the screen
+
+| Field | Meaning |
+| --- | --- |
+| `REC` / `RECORDING` | Capture is active; RECORDING also requires diagnostic data within the last 30 seconds. |
+| `SESSION ALERTS` | Total non-informational analyzer events in this recording. |
+| `H` / `M` / `L` | High-, medium-, and low-severity event counts. Repeated events count separately. |
+| `RX` | Time since diagnostic traffic arrived; `NONE` means none has arrived in this recording. |
+| `RUN` | Recording duration, frozen while paused. Time uses a monotonic clock, so an incorrect device date does not distort these ages. |
+| `BAT` | Device-reported charge level and charging state; Orbic reports coarse percentage steps. |
+| `CONFIG HTTP :8080` | Open a listed IP using this port, such as <http://192.168.1.1:8080>. The port follows the configuration. |
+| `LAN` / `USB` / `WIFI` | Assigned private/link-local IPv4 addresses. They refresh every five seconds; more than two rotate in pairs. |
+
+Counts reset when a new recording starts or the daemon restarts. Pausing keeps
+the last run's counts. Screen tests and LAN tests do not add detections. Counts
+above 999 display as `999+`; recording reports retain the individual events.
+Counts represent analyzer events, not unique towers or confirmed surveillance
+devices. Zero alerts does not establish that a cellular network is safe.
+
+### Status and recovery
+
+| Display | What it means / what to do |
+| --- | --- |
+| `STARTING` | Capture has not started yet. |
+| `WAIT DATA` | No diagnostic data yet, or none received for over 30 seconds. Check the recording and device status in the web interface. |
+| `LOW ALERT`, `MED ALERT`, `HIGH ALERT` | Highest severity seen in the current recording. Open its analysis report for details. |
+| `PAUSED` | Capture stopped. Start a recording in the web UI to resume. |
+| `ANALYSIS!` | An analysis failure may have made the counts incomplete. Check the log; the flag clears with a new recording. |
+| `DIAG ERROR` | The capture task ended or failed. Check the log and restart Rayhunter after resolving the cause. |
+| `BAT UNKNOWN` | Battery information could not be read. |
+| `NO LAN IP` / `IP READ FAILED` | No eligible address is assigned, or interface enumeration failed. Check USB/Wi-Fi connectivity. |
+
+Press Power/OK to wake the screen. Alerts request wake through the Orbic
+display service and flash until cleared; press Power/OK or Menu, or use **Stop Alert** in the web UI,
+to acknowledge it. Acknowledgment preserves recording and detection counts.
+Tactical mode covers the stock menus; choose **Subtle mode** in the web UI to
+use the original hotspot interface again. The mode does not change hotspot,
+Wi-Fi, cellular, or X Suite LAN-alert settings.
+
+For illustrated severity/error examples, the following **sample rendering** uses
+invented counts and addresses; it is separate from the actual-device captures above.
+
+![Illustrative tactical LCD recording, high-alert, paused and capture-error states](doc/images/tactical-lcd-preview.png)
+
+Operating details: [Using Rayhunter](doc/using-rayhunter.md) and
+[Configuration](doc/configuration.md). Local test results, preservation checks,
+reproduction commands, and remaining hardware checks are recorded in the
+[tactical LCD validation record](doc/tactical-lcd-validation.md).
+
 ## On-device screen alert
 
 ### What this fork adds
@@ -16,18 +101,24 @@ This fork is based on Rayhunter 0.12.0 and adds a **latched, on-device warning s
 - Alternates a red/white warning frame and a dark/red frame every 500 ms.
 - Keeps flashing until the alert is explicitly acknowledged; the normal display timeout does not silence it.
 - Clears the overlay with the physical **Power/OK** or **Menu** button, or with **Stop Alert** in the web UI.
-- Restores the framebuffer, brightness, blanking state, vendor display state, and backlight state that existed before the alert.
+- Repaints the live tactical dashboard after acknowledgment (or restores the previous framebuffer in other UI modes). Leaves LCD power sequencing to the vendor service.
 - Preserves recording and warning state. Acknowledging the overlay does not stop a recording, erase a capture, or remove its warning.
 - Alerts on the first non-informational warning in a recording. After acknowledgement, the same or a lower severity does not repeatedly wake the screen; a higher severity or the first warning in a new recording alerts again.
 - Includes an enable/disable setting, configurable English message, character counter, validation, **Test Screen Alert**, and **Stop Alert** controls.
 - Includes `POST /api/test-screen-alert` and `POST /api/acknowledge-screen-alert` endpoints with bounded response timeouts and explicit error responses.
-- Uses the Orbic vendor LCD initialization and backlight controls when waking a fully sleeping panel. This prevents the solid-white, full-backlight failure caused by turning on only the backlight.
+- Uses the existing Orbic `/usr/bin/qt_test` service command to request wake, refreshed every five seconds while flashing. No direct LCD reset, initialization, blanking or backlight writes. If the vendor command is unavailable, the overlay still renders and a log message explains that a physical wake may be needed. Moxee wake behavior requires its own hardware validation.
 - Keeps the alert command path separate from recording/display status so a test or acknowledgement cannot manufacture or erase a detection.
 - Exposes the controls only on the currently supported Orbic/Moxee framebuffer path; other device implementations continue using their existing display behavior.
 
 ### Hardware result
 
-The left image is the normal Orbic interface after the overlay has been cleared. The right image is the same physical device displaying the latched test alert.
+These earlier camera photographs show **Subtle mode**, with the stock hotspot
+interface beneath Rayhunter's status bar, and the latched test alert. The new
+Tactical mode framebuffer captures are shown above. On September 23, the owner
+reported a white, stuck panel after clearing an alert; a power cycle restored it.
+That failed hardware result supersedes the earlier framebuffer-only success.
+The revised service-based wake implementation and its physical verification
+are tracked in the [validation record](doc/tactical-lcd-validation.md).
 
 | Normal/idle device screen                                                                        | Active warning overlay                                                                                                        |
 | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |

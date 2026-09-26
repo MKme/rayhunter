@@ -25,6 +25,7 @@ pub enum UiLevel {
     Demo = 2,
     EffLogo = 3,
     HighVisibility = 4,
+    Tactical = 5,
     TransFlag = 128,
 }
 

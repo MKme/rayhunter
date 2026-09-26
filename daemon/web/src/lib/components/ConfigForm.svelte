@@ -250,6 +250,9 @@
                         <option value={2}>Demo mode (orca gif)</option>
                         <option value={3}>EFF logo</option>
                         <option value={4}>High visibility (full screen color)</option>
+                        {#if config.device === 'orbic' || config.device === 'moxee'}
+                            <option value={5}>Tactical dashboard (Orbic / Moxee)</option>
+                        {/if}
                     </select>
                     <p class="text-xs text-gray-500 mt-1">
                         Note: Rayhunter draws over the device's native UI, so some flickering is

@@ -1,31 +1,83 @@
+use super::tactical::{self, SharedStats, Telemetry};
 use crate::config;
 use crate::display::generic_framebuffer::{self, Dimensions, GenericFramebuffer};
 use crate::display::{DisplayState, ScreenAlertCommand};
 use async_trait::async_trait;
 use log::warn;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 
 use tokio::sync::mpsc::Receiver;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 const FB_PATH: &str = "/dev/fb0";
-const FB_BLANK_PATH: &str = "/sys/class/graphics/fb0/blank";
-const BACKLIGHT_BRIGHTNESS_PATH: &str = "/sys/class/leds/lcd-backlight/brightness";
-const BACKLIGHT_MAX_PATH: &str = "/sys/class/leds/lcd-backlight/max_brightness";
-const DISPLAY_ON_PATH: &str = "/sys/devices/78b6000.spi/spi_master/spi1/spi1.0/display_on";
-const BACKLIGHT_GPIO_PATH: &str = "/sys/devices/78b6000.spi/spi_master/spi1/spi1.0/bl_gpio";
-const DISPLAY_INIT_PATH: &str = "/sys/devices/78b6000.spi/spi_master/spi1/spi1.0/init";
+const VENDOR_DISPLAY_TOOL: &str = "/usr/bin/qt_test";
+const WAKE_REFRESH: Duration = Duration::from_secs(5);
+// Two queued wake requests must still fit the API's two-second response budget.
+const WAKE_TIMEOUT: Duration = Duration::from_millis(750);
 
 #[derive(Default)]
 struct Framebuffer {
+    panel: PanelPaths,
+    tactical: Option<TacticalDisplay>,
     saved_frame: Option<Vec<u8>>,
-    saved_brightness: Option<Vec<u8>>,
-    saved_blank: Option<Vec<u8>>,
-    saved_display_on: Option<Vec<u8>>,
-    saved_backlight_gpio: Option<Vec<u8>>,
-    alert_brightness: Option<Vec<u8>>,
-    vendor_wake_ready: bool,
+    last_wake: Option<Instant>,
     wake_failure_logged: bool,
+}
+
+struct PanelPaths {
+    framebuffer: PathBuf,
+    vendor_tool: PathBuf,
+}
+
+impl Default for PanelPaths {
+    fn default() -> Self {
+        Self {
+            framebuffer: FB_PATH.into(),
+            vendor_tool: VENDOR_DISPLAY_TOOL.into(),
+        }
+    }
+}
+
+// Ask the existing Orbic service to wake the display. It owns the LCD sleep,
+// reset and backlight sequence. Direct sysfs writes can race that service and
+// leave the physical panel white even while framebuffer readback is correct.
+async fn wake_vendor_display(tool: &Path) -> bool {
+    let request = async {
+        let mut child = tokio::process::Command::new(tool)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        // 24: Set Screen Status; 1: awake; -1: exit. No key/reset events.
+        let mut stdin = child.stdin.take()?;
+        stdin.write_all(b"24\n1\n-1\n").await.ok()?;
+        drop(stdin);
+        let output = child.wait_with_output().await.ok()?;
+        Some(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("Successed, rc:12"),
+        )
+    };
+    tokio::time::timeout(WAKE_TIMEOUT, request)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+struct TacticalDisplay {
+    stats: SharedStats,
+    telemetry: Telemetry,
+    refreshed: Option<Instant>,
+    started: Instant,
+    port: u16,
+    device: rayhunter::Device,
 }
 
 #[async_trait]
@@ -47,110 +99,89 @@ impl GenericFramebuffer for Framebuffer {
             raw_buffer.extend(rgb565.to_le_bytes());
         }
 
-        tokio::fs::write(FB_PATH, &raw_buffer).await.unwrap();
+        tokio::fs::write(&self.panel.framebuffer, &raw_buffer)
+            .await
+            .unwrap();
+    }
+
+    async fn draw_tactical(&mut self) -> bool {
+        let Some(display) = &mut self.tactical else {
+            return false;
+        };
+        let now = Instant::now();
+        if display
+            .refreshed
+            .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(5))
+        {
+            display.telemetry.battery = crate::battery::get_battery_status(&display.device)
+                .await
+                .ok()
+                .map(|b| (b.level, b.is_plugged_in));
+            display.telemetry.addresses.clear();
+            match if_addrs::get_if_addrs() {
+                Ok(interfaces) => {
+                    display.telemetry.network_error = false;
+                    for interface in interfaces {
+                        if let std::net::IpAddr::V4(ip) = interface.ip() {
+                            if let Some(address) = tactical::config_address(&interface.name, ip) {
+                                display.telemetry.addresses.push(address);
+                            }
+                        }
+                    }
+                    display.telemetry.addresses.sort();
+                    display.telemetry.addresses.dedup();
+                }
+                Err(_) => display.telemetry.network_error = true,
+            }
+            display.refreshed = Some(now);
+        }
+        let stats = display.stats.lock().unwrap().clone();
+        let pixels = tactical::render(
+            &stats,
+            &display.telemetry,
+            display.port,
+            now,
+            (now.duration_since(display.started).as_secs() / 5) as usize,
+        );
+        self.write_buffer(pixels).await;
+        true
     }
 
     async fn begin_screen_alert(&mut self) {
         self.wake_failure_logged = false;
-        if self.saved_frame.is_none() {
-            self.saved_frame = tokio::fs::read(FB_PATH).await.ok();
+        self.last_wake = None;
+        if self.tactical.is_none() && self.saved_frame.is_none() {
+            self.saved_frame = tokio::fs::read(&self.panel.framebuffer).await.ok();
         }
-        if self.saved_brightness.is_none() {
-            self.saved_brightness = tokio::fs::read(BACKLIGHT_BRIGHTNESS_PATH).await.ok();
-            self.alert_brightness = tokio::fs::read(BACKLIGHT_MAX_PATH).await.ok();
-        }
-        if self.saved_blank.is_none() {
-            self.saved_blank = tokio::fs::read(FB_BLANK_PATH).await.ok();
-        }
-        if self.saved_display_on.is_none() {
-            self.saved_display_on = tokio::fs::read(DISPLAY_ON_PATH).await.ok();
-        }
-        if self.saved_backlight_gpio.is_none() {
-            self.saved_backlight_gpio = tokio::fs::read(BACKLIGHT_GPIO_PATH).await.ok();
-        }
-
-        // Waking only the RC400L backlight can leave the ST7735S controller's
-        // display RAM solid white. Reinitialize the panel after a real screen
-        // timeout, but avoid the visible clear when the screen is already on.
-        let panel_ready = if self
-            .saved_backlight_gpio
-            .as_deref()
-            .is_some_and(sysfs_value_is_on)
-        {
-            true
-        } else {
-            tokio::fs::write(DISPLAY_INIT_PATH, b"1").await.is_ok()
-        };
-        let display_on = tokio::fs::write(DISPLAY_ON_PATH, b"1").await.is_ok();
-        self.vendor_wake_ready = panel_ready && display_on;
         self.keep_screen_alert_awake().await;
     }
 
     async fn keep_screen_alert_awake(&mut self) {
-        if let Some(brightness) = &self.alert_brightness {
-            tokio::fs::write(BACKLIGHT_BRIGHTNESS_PATH, brightness)
-                .await
-                .ok();
+        if self.last_wake.is_some_and(|at| at.elapsed() < WAKE_REFRESH) {
+            return;
         }
-        // The RC400L's vendor fbtft driver exposes its active-low backlight
-        // control on the SPI device. The generic framebuffer blank ioctl is not
-        // implemented by this driver, so reassert this while the alert flashes.
-        let backlight_on = tokio::fs::write(BACKLIGHT_GPIO_PATH, b"1").await.is_ok();
-        let sysfs_unblanked = tokio::fs::write(FB_BLANK_PATH, b"0").await.is_ok();
-        let ioctl_unblanked = ioctl_unblank_framebuffer();
-        let vendor_unblanked = self.vendor_wake_ready && backlight_on;
-        let wake_succeeded = vendor_unblanked || sysfs_unblanked || ioctl_unblanked;
-        if !wake_succeeded && !self.wake_failure_logged {
-            warn!("unable to unblank Orbic framebuffer for screen alert");
+        self.last_wake = Some(Instant::now());
+        if !wake_vendor_display(&self.panel.vendor_tool).await && !self.wake_failure_logged {
+            warn!(
+                "vendor LCD wake unavailable; alert is rendered but may require Power/OK to wake the screen"
+            );
             self.wake_failure_logged = true;
         }
     }
 
     async fn end_screen_alert(&mut self) {
-        if let Some(frame) = self.saved_frame.take() {
-            tokio::fs::write(FB_PATH, frame).await.ok();
+        // Leave the display awake for review and let the OEM timeout sleep it.
+        // Never restore stale power controls or reinitialize the LCD here.
+        self.last_wake = None;
+        self.keep_screen_alert_awake().await;
+        if self.tactical.is_some() {
+            self.draw_tactical().await;
+            self.saved_frame = None;
+        } else if let Some(frame) = self.saved_frame.take() {
+            tokio::fs::write(&self.panel.framebuffer, frame).await.ok();
         }
-        if let Some(brightness) = self.saved_brightness.take() {
-            tokio::fs::write(BACKLIGHT_BRIGHTNESS_PATH, brightness)
-                .await
-                .ok();
-        }
-        if let Some(blank) = self.saved_blank.take() {
-            tokio::fs::write(FB_BLANK_PATH, blank).await.ok();
-        }
-        if let Some(display_on) = self.saved_display_on.take() {
-            tokio::fs::write(DISPLAY_ON_PATH, display_on).await.ok();
-        }
-        if let Some(backlight_gpio) = self.saved_backlight_gpio.take() {
-            tokio::fs::write(BACKLIGHT_GPIO_PATH, backlight_gpio)
-                .await
-                .ok();
-        }
-        self.alert_brightness = None;
-        self.vendor_wake_ready = false;
+        self.last_wake = None;
     }
-}
-
-fn sysfs_value_is_on(value: &[u8]) -> bool {
-    value.iter().copied().any(|byte| byte == b'1')
-}
-
-#[cfg(target_os = "linux")]
-fn ioctl_unblank_framebuffer() -> bool {
-    use std::fs::OpenOptions;
-    use std::os::fd::AsRawFd;
-
-    const FBIOBLANK: u64 = 0x4611;
-    let Ok(framebuffer) = OpenOptions::new().read(true).write(true).open(FB_PATH) else {
-        return false;
-    };
-    // FB_BLANK_UNBLANK is zero. msm_fb routes this ioctl to the panel/backlight driver.
-    unsafe { libc::ioctl(framebuffer.as_raw_fd(), FBIOBLANK as _, 0) >= 0 }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn ioctl_unblank_framebuffer() -> bool {
-    false
 }
 
 pub fn update_ui(
@@ -159,11 +190,23 @@ pub fn update_ui(
     shutdown_token: CancellationToken,
     ui_update_rx: Receiver<DisplayState>,
     screen_alert_rx: Receiver<ScreenAlertCommand>,
+    tactical_stats: SharedStats,
 ) {
+    let framebuffer = Framebuffer {
+        tactical: (config.ui_level == config::UiLevel::Tactical).then(|| TacticalDisplay {
+            stats: tactical_stats,
+            telemetry: Telemetry::default(),
+            refreshed: None,
+            started: Instant::now(),
+            port: config.port,
+            device: config.device.clone(),
+        }),
+        ..Framebuffer::default()
+    };
     generic_framebuffer::update_ui(
         task_tracker,
         config,
-        Framebuffer::default(),
+        framebuffer,
         shutdown_token,
         ui_update_rx,
         Some(screen_alert_rx),
@@ -172,12 +215,74 @@ pub fn update_ui(
 
 #[cfg(test)]
 mod tests {
-    use super::sysfs_value_is_on;
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
-    #[test]
-    fn parses_vendor_backlight_state() {
-        assert!(sysfs_value_is_on(b"1\n"));
-        assert!(!sysfs_value_is_on(b"0\n"));
-        assert!(!sysfs_value_is_on(b""));
+    fn fake_vendor(dir: &Path, response: &str) -> PathBuf {
+        let tool = dir.join("qt_test");
+        std::fs::write(&tool, format!(
+            "#!/bin/sh\nread choice\nread state\nread quit\n[ \"$choice:$state:$quit\" = \"24:1:-1\" ] || exit 1\nprintf '%s' '{}'\n",
+            response
+        )).unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        tool
+    }
+
+    #[tokio::test]
+    async fn vendor_wake_requires_successful_service_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!wake_vendor_display(&dir.path().join("missing")).await);
+        let tool = fake_vendor(dir.path(), "Failed");
+        assert!(!wake_vendor_display(&tool).await);
+        let tool = fake_vendor(dir.path(), "Successed, rc:12");
+        assert!(wake_vendor_display(&tool).await);
+        std::fs::write(&tool, "#!/bin/sh\nprintf 'Successed, rc:12'\nexit 1\n").unwrap();
+        assert!(!wake_vendor_display(&tool).await);
+        // A hung vendor utility must not indefinitely block acknowledgment.
+        std::fs::write(&tool, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        let started = Instant::now();
+        assert!(!wake_vendor_display(&tool).await);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn tactical_alert_acknowledgment_repaints_and_leaves_power_to_vendor() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = Instant::now();
+        let stats = SharedStats::default();
+        stats.lock().unwrap().start(now);
+        stats.lock().unwrap().receive(now);
+        let mut fb = Framebuffer {
+            panel: PanelPaths {
+                framebuffer: dir.path().join("fb"),
+                vendor_tool: fake_vendor(dir.path(), "Successed, rc:12"),
+            },
+            tactical: Some(TacticalDisplay {
+                stats,
+                telemetry: Telemetry::default(),
+                refreshed: Some(now),
+                started: now,
+                port: 8080,
+                device: rayhunter::Device::Orbic,
+            }),
+            saved_frame: Some(vec![255; 32768]),
+            ..Framebuffer::default()
+        };
+        fb.begin_screen_alert().await;
+        assert!(!fb.wake_failure_logged);
+        let first_wake = fb.last_wake;
+        fb.keep_screen_alert_awake().await;
+        assert_eq!(
+            fb.last_wake, first_wake,
+            "wake must be throttled between frames"
+        );
+        fb.end_screen_alert().await;
+        let frame = tokio::fs::read(&fb.panel.framebuffer).await.unwrap();
+        assert_eq!(frame.len(), 32768);
+        assert_ne!(frame, vec![255; 32768]);
+        assert!(frame.windows(2).any(|pixel| pixel != &frame[..2]));
+        assert!(fb.saved_frame.is_none());
+        assert!(fb.last_wake.is_none());
+        assert!(!fb.wake_failure_logged);
     }
 }

@@ -23,9 +23,9 @@ const LOW_BATTERY_LEVEL: u8 = 10;
 #[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
 pub struct BatteryState {
     /// The current level in percentage of the device battery
-    level: u8,
+    pub(crate) level: u8,
     /// A boolean indicating whether the battery is currently being charged
-    is_plugged_in: bool,
+    pub(crate) is_plugged_in: bool,
 }
 
 async fn is_plugged_in_from_file(path: &Path) -> Result<bool, RayhunterError> {

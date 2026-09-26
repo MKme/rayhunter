@@ -220,6 +220,9 @@ async fn run_with_config(
     let store = init_qmdl_store(&config).await?;
     let analysis_status = AnalysisStatus::new(&store);
     let qmdl_store_lock = Arc::new(RwLock::new(store));
+    let tactical_stats = std::sync::Arc::new(std::sync::Mutex::new(
+        display::tactical::TacticalStats::default(),
+    ));
     let (diag_tx, diag_rx) = mpsc::channel::<DiagDeviceCtrlMessage>(1);
     let (ui_update_tx, ui_update_rx) = mpsc::channel::<display::DisplayState>(1);
     let (screen_alert_tx, screen_alert_rx) = mpsc::channel::<display::ScreenAlertCommand>(4);
@@ -265,6 +268,7 @@ async fn run_with_config(
             config.gps_mode,
             gps_fixed_coords,
             Some(xsuite_alert_tx.clone()),
+            tactical_stats.clone(),
         );
         info!("Starting UI");
 
@@ -277,6 +281,7 @@ async fn run_with_config(
                     shutdown_token.clone(),
                     ui_update_rx,
                     screen_alert_rx,
+                    tactical_stats.clone(),
                 );
             }
             Device::Tplink => {
